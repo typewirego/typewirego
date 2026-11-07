@@ -208,13 +208,18 @@ func (c *Container) awaitLocked(ctx context.Context, chain *frame, cr *inst) (an
 	if waiter != nil {
 		waiter.waits[cr]++
 	}
+	cr.waiters++
 	c.mu.Unlock()
 	select {
 	case <-cr.done:
 	case <-ctx.Done():
 	}
+	if c.afterWake != nil {
+		c.afterWake(cr.token)
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	cr.waiters--
 	if waiter != nil {
 		if waiter.waits[cr]--; waiter.waits[cr] <= 0 {
 			delete(waiter.waits, cr)

@@ -66,22 +66,25 @@ func TestDrainerBetweenEventsAtTheDeadlineIsStoppedAndFlushRuns(t *testing.T) {
 	if c.Stats().QueueDrops == 0 {
 		t.Fatal("the stopped drainer's backlog was not counted")
 	}
-	if o.find(typewirego.EventClosed, "") != nil {
-		t.Fatal("the stopped drainer delivered its backlog")
+	waitClosed(t, typewirego.DrainerExited(c), "the drainer to exit")
+	events := o.got()
+	if events[len(events)-1].Kind != typewirego.EventClosing || o.overlap.Load() {
+		t.Fatalf("the stopped drainer delivered more events: %v", o.kinds())
 	}
 }
 
 func TestFlushIgnoringItsContextReturnsAtTheAllowance(t *testing.T) {
+	const allowance = 10 * time.Millisecond
 	release := make(chan struct{})
 	c, _ := observed(func(o *recObserver) {
 		o.flush = func(context.Context) error { <-release; return errors.New("ignored") }
-	}, typewirego.WithFlushBudget(10*time.Millisecond))
+	}, typewirego.WithFlushBudget(allowance))
 	start := time.Now()
 	if err := c.Teardown(bg()); err != nil {
 		t.Fatalf("teardown = %v (no observer set, so nothing is held back)", err)
 	}
-	if el := time.Since(start); el > time.Second {
-		t.Fatalf("Teardown waited %v for a Flush ignoring its context", el)
+	if el := time.Since(start); el > allowance+typewirego.CleanupGrace+400*time.Millisecond {
+		t.Fatalf("Teardown waited %v for a Flush ignoring its context, want about %v", el, allowance+typewirego.CleanupGrace)
 	}
 	if c.Stats().FlushErrors != 1 {
 		t.Fatalf("FlushErrors = %d", c.Stats().FlushErrors)
@@ -198,27 +201,44 @@ func TestObserverPullWakingAfterTheTeardownSnapshotIsInTheObserverSet(t *testing
 	log := &orderLog{}
 	g := newGate()
 	sink := gated("t.Sink", typewirego.Singleton, g, newRes("t.Sink", log), false)
+	obsResult := make(chan error, 1)
+	resume := make(chan struct{})
+	// The main pass runs after the snapshot: only then does the observer's
+	// waiter get to wake.
+	releaser := typewirego.Of(typewirego.Opts[*hookCloser]{Token: "t.Releaser", Creator: func(context.Context) (*hookCloser, error) {
+		return &hookCloser{close: func() error {
+			close(resume)
+			if err := recv(t, obsResult, "observer pull"); err != nil {
+				t.Errorf("observer pull woken after the snapshot = %v, want the value", err)
+			}
+			log.add("t.Releaser")
+			return nil
+		}}, nil
+	}})
 	c, o := observed(func(o *recObserver) {
 		o.flush = func(context.Context) error { log.add("flush"); return nil }
 	})
-	apply(t, c, sink)
+	apply(t, c, sink, releaser)
+	mustResolve(t, c, releaser)
+	typewirego.SetAfterWakeHook(c, func(tok typewirego.Token) {
+		if tok == sink.Token() {
+			<-resume
+		}
+	})
 	go c.Resolve(bg(), sink.Token())
 	waitClosed(t, g.started, "sink")
-	errc := make(chan error, 1)
-	go func() { _, err := o.r.Resolve(bg(), sink.Token()); errc <- err }()
+	go func() { _, err := o.r.Resolve(bg(), sink.Token()); obsResult <- err }()
 	eventually(t, "the observer's wait", func() bool { return typewirego.ObserverWaiting(c, sink.Token()) })
 	g.open()
 	eventually(t, "sink cached", func() bool { _, err := c.GetCached(sink.Token()); return err == nil })
-	// Whether the observer has woken yet or not, the token it waits on is
-	// part of the snapshot.
+	if !typewirego.ObserverWaiting(c, sink.Token()) {
+		t.Fatal("the observer woke before the snapshot")
+	}
 	if err := c.Teardown(bg()); err != nil {
 		t.Fatal(err)
 	}
-	if err := recv(t, errc, "observer"); err != nil {
-		t.Fatalf("observer pull = %v", err)
-	}
-	if got := log.get(); !slices.Equal(got, []string{"flush", "t.Sink"}) {
-		t.Fatalf("order = %v", got)
+	if got := log.get(); !slices.Equal(got, []string{"t.Releaser", "flush", "t.Sink"}) {
+		t.Fatalf("order = %v, want the waited-on sink cleaned with the observer set", got)
 	}
 }
 
@@ -327,13 +347,24 @@ func TestTeardownAbandonsADrainerStuckInOnEvent(t *testing.T) {
 }
 
 func TestZeroFlushBudgetNeverAbandonsADisabledDrainerWithEventsQueued(t *testing.T) {
+	blocked := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
 	c, o := observed(func(o *recObserver) {
-		o.onEvent = func(typewirego.Event) { panic("disable me") }
+		o.onEvent = func(typewirego.Event) {
+			once.Do(func() { close(blocked); <-release })
+			panic("disable me")
+		}
 	}, typewirego.WithFlushBudget(0))
-	for _, w := range []typewirego.AnyWire{leafWire("t.A"), leafWire("t.B"), leafWire("t.C")} {
-		apply(t, c, w)
+	ws := []typewirego.AnyWire{leafWire("t.A"), leafWire("t.B"), leafWire("t.C")}
+	apply(t, c, ws...)
+	waitClosed(t, blocked, "the first OnEvent")
+	// Events queue up behind the stuck first OnEvent.
+	for _, w := range ws {
 		mustResolve(t, c, w)
 	}
+	close(release)
+	eventually(t, "the observer to be disabled", func() bool { return c.Stats().ObserverPanics == 1 })
 	if err := c.Teardown(bg()); err != nil {
 		t.Fatalf("teardown = %v", err)
 	}
@@ -342,6 +373,9 @@ func TestZeroFlushBudgetNeverAbandonsADisabledDrainerWithEventsQueued(t *testing
 	}
 	if o.flushed.Load() != 0 {
 		t.Fatal("a disabled observer was flushed")
+	}
+	if n := len(o.got()); n != 1 {
+		t.Fatalf("a disabled observer received %d events", n)
 	}
 	if err := c.Wait(ctxWithTimeout(t)); err != nil {
 		t.Fatal(err)

@@ -35,6 +35,8 @@ func TestP11ConcurrentFirstResolveCreatesOnce(t *testing.T) {
 		})
 	}
 	waitClosed(t, g.started, "creator start")
+	// Every caller is on the one latch before the creation can finish.
+	eventually(t, "all callers on the latch", func() bool { return typewirego.LatchWaiters(c, w.Token()) == n })
 	g.open()
 	wg.Wait()
 	close(results)
@@ -57,7 +59,9 @@ func TestP11WaitersShareCreatorError(t *testing.T) {
 	boom := errors.New("boom")
 	var calls atomic.Int32
 	w := typewirego.Of(typewirego.Opts[int]{Token: "t.Fail", Creator: func(context.Context) (int, error) {
-		calls.Add(1)
+		if calls.Add(1) > 1 {
+			return 1, nil // a retry would succeed, so a waiter that retried would not see boom
+		}
 		g.enter()
 		return 0, boom
 	}})
@@ -74,19 +78,18 @@ func TestP11WaitersShareCreatorError(t *testing.T) {
 		})
 	}
 	waitClosed(t, g.started, "creator start")
-	// Give every waiter the chance to join the latch; the assertion below
-	// holds whether a waiter joined or retried after the failure.
+	eventually(t, "all callers on the latch", func() bool { return typewirego.LatchWaiters(c, w.Token()) == n })
 	g.open()
 	wg.Wait()
 	close(errs)
 	for err := range errs {
 		var ce *typewirego.CreatorError
 		if !errors.As(err, &ce) || !errors.Is(err, boom) {
-			t.Fatalf("waiter got %v, want the creator's error", err)
+			t.Fatalf("waiter got %v, want the shared creator error", err)
 		}
 	}
-	if calls.Load() < 1 {
-		t.Fatal("creator never ran")
+	if calls.Load() != 1 {
+		t.Fatalf("creator ran %d times, want 1 shared creation", calls.Load())
 	}
 }
 
@@ -128,8 +131,11 @@ func TestP11WaiterContextExpiryLeavesCreatorRunning(t *testing.T) {
 
 func TestP11CallerCancelDoesNotFailOtherWaiters(t *testing.T) {
 	g := newGate()
-	w := typewirego.Of(typewirego.Opts[string]{Token: "t.Shared", Creator: func(context.Context) (string, error) {
+	w := typewirego.Of(typewirego.Opts[string]{Token: "t.Shared", Creator: func(ctx context.Context) (string, error) {
 		g.enter()
+		if err := ctx.Err(); err != nil {
+			return "", err // a caller's cancel must not reach here
+		}
 		return "v", nil
 	}})
 	c := typewirego.NewContainer(bg())
@@ -137,17 +143,19 @@ func TestP11CallerCancelDoesNotFailOtherWaiters(t *testing.T) {
 	apply(t, c, w)
 	ctx, cancel := context.WithCancel(bg())
 	cancelled := make(chan error, 1)
-	patient := make(chan error, 1)
+	patient := make(chan any, 1)
+	// The caller that will cancel starts the creation.
 	go func() { _, err := c.Resolve(ctx, w.Token()); cancelled <- err }()
-	go func() { _, err := c.Resolve(bg(), w.Token()); patient <- err }()
 	waitClosed(t, g.started, "creator start")
+	go func() { v, _ := c.Resolve(bg(), w.Token()); patient <- v }()
+	eventually(t, "both callers on the latch", func() bool { return typewirego.LatchWaiters(c, w.Token()) == 2 })
 	cancel()
 	if err := recv(t, cancelled, "cancelled waiter"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled waiter = %v", err)
 	}
 	g.open()
-	if err := recv(t, patient, "patient waiter"); err != nil {
-		t.Fatalf("patient waiter failed: %v", err)
+	if v := recv(t, patient, "patient waiter"); v != "v" {
+		t.Fatalf("patient waiter got %v, want the shared value", v)
 	}
 }
 
@@ -182,16 +190,20 @@ func TestP11TwoGoroutineCycleIsCircularDependencyError(t *testing.T) {
 		if !errors.As(err, &cycle) {
 			t.Fatalf("got %v, want a circular dependency error", err)
 		}
-		if len(cycle.Path) != 3 || cycle.Path[0] != cycle.Path[2] {
-			t.Fatalf("path = %v, want a two-token cycle", cycle.Path)
+		p := cycle.Path
+		labels := map[string]bool{"t.X": true, "t.Y": true}
+		if len(p) != 3 || p[0] != p[2] || p[0] == p[1] || !labels[p[0]] || !labels[p[1]] {
+			t.Fatalf("path = %v, want t.X -> t.Y -> t.X or t.Y -> t.X -> t.Y", p)
 		}
 	}
 }
 
 func TestP11CreatorPanicReleasesLatch(t *testing.T) {
+	g := newGate()
 	var calls atomic.Int32
 	w := typewirego.Of(typewirego.Opts[string]{Token: "t.Panics", Creator: func(context.Context) (string, error) {
 		if calls.Add(1) == 1 {
+			g.enter()
 			panic("first call panics")
 		}
 		return "ok", nil
@@ -199,13 +211,22 @@ func TestP11CreatorPanicReleasesLatch(t *testing.T) {
 	c := typewirego.NewContainer(bg())
 	defer c.Teardown(bg())
 	apply(t, c, w)
-	_, err := c.Resolve(bg(), w.Token())
-	var ce *typewirego.CreatorError
-	if !errors.As(err, &ce) || ce.Label != "t.Panics" {
-		t.Fatalf("panic surfaced as %v, want *CreatorError", err)
+	errs := make(chan error, 2)
+	for range 2 {
+		go func() { _, err := c.Resolve(ctxWithTimeout(t), w.Token()); errs <- err }()
 	}
-	if v := mustResolve(t, c, w); v != "ok" {
-		t.Fatalf("retry got %v", v)
+	waitClosed(t, g.started, "creator start")
+	eventually(t, "a second caller on the latch", func() bool { return typewirego.LatchWaiters(c, w.Token()) == 2 })
+	g.open()
+	for range 2 {
+		var ce *typewirego.CreatorError
+		if err := recv(t, errs, "waiter"); !errors.As(err, &ce) || ce.Label != "t.Panics" {
+			t.Fatalf("waiter got %v, want *CreatorError", err)
+		}
+	}
+	v, err := c.Resolve(ctxWithTimeout(t), w.Token())
+	if err != nil || v != "ok" {
+		t.Fatalf("retry after the panic = %v, %v", v, err)
 	}
 }
 
@@ -255,7 +276,9 @@ func TestP12TeardownCancelsInFlightCreators(t *testing.T) {
 	errc := make(chan error, 1)
 	go func() { _, err := c.Resolve(bg(), w.Token()); errc <- err }()
 	waitClosed(t, started, "creator start")
-	if err := c.Teardown(bg()); err != nil {
+	done := make(chan error, 1)
+	go func() { done <- c.Teardown(bg()) }()
+	if err := recv(t, done, "teardown (it hangs if the creator is never cancelled)"); err != nil {
 		t.Fatalf("teardown = %v", err)
 	}
 	err := recv(t, errc, "resolve")
@@ -373,19 +396,20 @@ func TestP12TeardownIsSerialized(t *testing.T) {
 	first := make(chan error, 1)
 	go func() { first <- c.Teardown(bg()) }()
 	waitClosed(t, r.in, "first teardown's cleanup")
-	second := make(chan error, 1)
-	go func() { second <- c.Teardown(bg()) }()
-	select {
-	case <-second:
-		t.Fatal("second Teardown returned while the first was running")
-	case <-time.After(20 * time.Millisecond):
-	}
+	var released atomic.Bool
+	second := make(chan bool, 1)
+	go func() {
+		err := c.Teardown(bg())
+		second <- err == nil && released.Load()
+	}()
+	eventually(t, "the second Teardown to queue", func() bool { return typewirego.TeardownsQueued(c) == 1 })
+	released.Store(true)
 	close(r.block)
 	if err := recv(t, first, "first teardown"); err != nil {
 		t.Fatal(err)
 	}
-	if err := recv(t, second, "second teardown"); err != nil {
-		t.Fatalf("second Teardown = %v, want nil", err)
+	if !recv(t, second, "second teardown") {
+		t.Fatal("the second Teardown returned before the first finished, or returned an error")
 	}
 	if log.count("t.Blocking") != 1 {
 		t.Fatal("value closed more than once")
@@ -423,9 +447,13 @@ func TestP13SingletonCreatorRunsUnderContainerContext(t *testing.T) {
 
 func TestP13CallerContextBoundsOnlyItsWait(t *testing.T) {
 	g := newGate()
+	var calls atomic.Int32
+	var creatorErr error = errors.New("unset")
 	w := typewirego.Of(typewirego.Opts[string]{Token: "t.Slow", Creator: func(ctx context.Context) (string, error) {
+		calls.Add(1)
 		g.enter()
-		return "slow", ctx.Err()
+		creatorErr = ctx.Err()
+		return "slow", nil
 	}})
 	c := typewirego.NewContainer(bg())
 	defer c.Teardown(bg())
@@ -437,21 +465,39 @@ func TestP13CallerContextBoundsOnlyItsWait(t *testing.T) {
 	}
 	g.open()
 	if v := mustResolve(t, c, w); v != "slow" {
-		t.Fatalf("creation did not survive the caller's deadline: %v", v)
+		t.Fatalf("value = %v", v)
+	}
+	if calls.Load() != 1 || creatorErr != nil {
+		t.Fatalf("creator ran %d times with ctx err %v: the caller's deadline reached the creation", calls.Load(), creatorErr)
 	}
 }
 
 func TestP13TransientCreatorRunsUnderCallerContext(t *testing.T) {
+	var got context.Context
 	w := typewirego.Of(typewirego.Opts[string]{Token: "t.T", Scope: typewirego.Transient,
 		Creator: func(ctx context.Context) (string, error) {
+			got = ctx
 			v, _ := ctx.Value(ctxKey{}).(string)
 			return v, nil
 		}})
 	c := typewirego.NewContainer(bg())
 	defer c.Teardown(bg())
 	apply(t, c, w)
-	v, err := c.Resolve(context.WithValue(bg(), ctxKey{}, "caller"), w.Token())
+	caller, cancel := context.WithTimeout(context.WithValue(bg(), ctxKey{}, "caller"), time.Hour)
+	v, err := c.Resolve(caller, w.Token())
 	if err != nil || v != "caller" {
 		t.Fatalf("transient saw %v, %v; want the caller's value", v, err)
 	}
+	if dl, ok := got.Deadline(); !ok || !dl.Equal(mustDeadline(caller)) {
+		t.Fatal("the transient creator did not get the caller's deadline")
+	}
+	cancel()
+	if got.Err() == nil {
+		t.Fatal("cancelling the caller did not reach the transient creator's context")
+	}
+}
+
+func mustDeadline(ctx context.Context) time.Time {
+	dl, _ := ctx.Deadline()
+	return dl
 }
