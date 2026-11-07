@@ -41,6 +41,11 @@
                   ];
 
                   enterShell = ''
+                    # devenv puts GOPATH, and so the module cache, under
+                    # .devenv inside the repository, where gofmt -l . would
+                    # walk into it. Keep Go's default, outside the tree.
+                    export GOPATH="$HOME/go"
+                    export PATH="$GOPATH/bin:$PATH"
                     echo "typewirego dev shell loaded"
                     echo "Go: $(go version)"
                   '';
