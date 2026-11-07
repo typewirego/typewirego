@@ -79,6 +79,7 @@ type AnyWire interface {
 	Imports() []Import
 	Scope() Scope
 	Apply(b Binder) error
+
 	core() *wireCore
 }
 

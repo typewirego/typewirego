@@ -190,3 +190,41 @@ func TestErrorCarriersMatchTheirSentinels(t *testing.T) {
 		t.Fatal("a carrier matches a foreign sentinel")
 	}
 }
+func TestDepRejectsAWireOutsideTheImports(t *testing.T) {
+	ctx := context.Background()
+	in := leafWire("t.In")
+	out := leafWire("t.Out")
+	var gotIn string
+	var errOut, errNil error
+	w := typewirego.Of(typewirego.Opts[string]{Token: "t.User",
+		Imports: []typewirego.Import{{Name: "in", Wire: in}},
+		CreateWith: func(_ context.Context, d typewirego.Deps, _ typewirego.Resolver) (string, error) {
+			var err error
+			if gotIn, err = typewirego.Dep(d, in); err != nil {
+				return "", err
+			}
+			_, errOut = typewirego.Dep(d, out)
+			_, errNil = typewirego.Dep[string](d, nil)
+			return "user", nil
+		}})
+	c := typewirego.NewContainer(ctx)
+	defer c.Teardown(ctx)
+	if err := typewirego.GroupOf(w, out).Apply(c); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.GetInstance(ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	if gotIn != "t.In" {
+		t.Errorf("Dep(in) = %q", gotIn)
+	}
+	if !errors.Is(errOut, typewirego.ErrNotImported) {
+		t.Errorf("Dep(out) error = %v, want ErrNotImported", errOut)
+	}
+	if !errors.Is(errNil, typewirego.ErrNotImported) {
+		t.Errorf("Dep(nil) error = %v, want ErrNotImported", errNil)
+	}
+	if _, err := typewirego.Dep(typewirego.Deps{}, in); !errors.Is(err, typewirego.ErrNotImported) {
+		t.Errorf("Dep on zero Deps = %v, want ErrNotImported", err)
+	}
+}
