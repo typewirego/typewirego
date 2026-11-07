@@ -87,6 +87,7 @@ type observerState struct {
 	wake  chan struct{}
 
 	inOnEvent     bool
+	betweenEvents func() // test hook, run between deliveries
 	stop          bool
 	stopNow       bool
 	abandoned     bool
@@ -199,10 +200,14 @@ func (c *Container) drain() {
 				o.queue = nil
 			}
 			abandoned := o.abandoned
+			hook := o.betweenEvents
 			c.mu.Unlock()
 			if abandoned {
 				c.participantDone()
 				return
+			}
+			if hook != nil {
+				hook()
 			}
 			continue
 		}
@@ -386,6 +391,8 @@ func (c *Container) observerTeardown(ctx context.Context, allowance time.Duratio
 			hold = true
 			c.mu.Unlock()
 		} else {
+			// Between events: the drainer checks stopNow before it takes
+			// another event, so it never calls OnEvent again.
 			o.stopNow = true
 			c.dropBacklogLocked()
 			select {
@@ -393,7 +400,6 @@ func (c *Container) observerTeardown(ctx context.Context, allowance time.Duratio
 			default:
 			}
 			c.mu.Unlock()
-			<-o.exited
 		}
 	}
 	timer.Stop()
