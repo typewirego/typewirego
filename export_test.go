@@ -38,3 +38,10 @@ func ObserverWaiting(c *Container, t Token) bool {
 	defer c.mu.Unlock()
 	return c.obs != nil && c.obs.waiting[t] > 0
 }
+
+// SetBetweenEventsHook installs f to run on the drainer between deliveries.
+func SetBetweenEventsHook(c *Container, f func()) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.obs.betweenEvents = f
+}
