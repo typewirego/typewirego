@@ -9,3 +9,7 @@ coverage*
 # editors
 .idea/
 .vscode/
+
+# agent scratch space and personal Claude Code settings
+.scratch/
+.claude/settings.local.json
