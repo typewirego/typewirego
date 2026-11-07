@@ -212,14 +212,17 @@ error`, `Close() error`, `Close()`. Any other value gets no cleanup. A value
 with both `Shutdown` and `Close` is shut down, not closed.
 
 - Go API: `Container.Teardown`, `Opts.KeepOpen`.
-- Only singleton values are cleaned: the container never retains a transient
-  that reached its caller, so it never closes one.
+- Singleton values are cleaned. A transient that reached its caller is never
+  retained, so it is never closed; a transient that finishes during Teardown's
+  wait, or after it as a late creation, is cleaned (P12).
 - **Ownership.** A wire owns what its creator creates. A value reachable
   through several wires (a pass-through wire returning an import's value, or
   two wires handing out one instance) is closed once: the first creation to
   finish with it owns it; the others are *aliases* and close nothing. The
-  owner's slot is the earliest of theirs, so the value outlives everything
-  created after it. Identity is Go's `==` on the dynamic value; a value whose
+  owner's slot is the earliest-created of theirs, the last that reverse
+  creation order reaches, so the value outlives everything created after it.
+  The owner is held back, or kept for the observer set, when any of the others
+  would be. Identity is Go's `==` on the dynamic value; a value whose
   dynamic type is not comparable is not deduplicated, and each wire returning
   it closes it.
 - A wire that attaches another import to a value it returns must wrap the value
@@ -229,7 +232,13 @@ with both `Shutdown` and `Close` is shut down, not closed.
   `Opts.KeepOpen` (or wraps the value in a type with no closer). The container
   never closes a comparable value a `KeepOpen` singleton returns, whichever
   wire returning it finished first, and every creation of it reports closer
-  `none` from then on. A `KeepOpen` transient protects only itself. A borrowed
+  `none` from then on. The exception is a `KeepOpen` creation that finishes
+  after Teardown has timed out: it cannot reclaim a value another wire already
+  owns, which that wire still closes. A `KeepOpen` transient protects only
+  itself, not a singleton that owns the same value, and never owns a value,
+  during Closing or after it. A `KeepOpen` value is otherwise a value with no
+  closer: it can still be held back for a late creation that imports it, which
+  delays only the end of its `Lifetime`. A borrowed
   value of a non-comparable type cannot be recognized: wrap it in a pointer, or
   make every wire that returns it `KeepOpen`. `WithCreator` keeps `KeepOpen`.
 
@@ -254,7 +263,8 @@ Pinned by:
 ## P9 Single use
 
 A container is single-use. Once Teardown begins, every resolve fails with
-`ErrClosing`, and so does `GetCached`.
+`ErrClosing`, and so does `GetCached`, except the observer Resolver's cache
+hits and set members that P16 still serves.
 
 - Go API: `ErrClosing`.
 
@@ -265,8 +275,11 @@ Pinned by:
 
 ## P10 Every cleanup runs, every failure is returned
 
-Teardown runs every cleanup and returns every failure to the caller, joined
-with `errors.Join`. A closer that panics is recovered, fails its cleanup and is
+Teardown runs every cleanup and returns the failures of every cleanup it
+completed, joined with `errors.Join`. Failures of the cleanups that finish
+after Teardown stopped waiting (late creations, calls left running, held-back
+values) are returned by `Wait` instead (P19); Flush results are never
+returned (P20). A closer that panics is recovered, fails its cleanup and is
 counted in `Stats.CleanupPanics`.
 
 - Go API: `Container.Teardown`'s error.
@@ -279,9 +292,8 @@ Pinned by:
 ## P11 Concurrent resolution
 
 Concurrent first resolves of a singleton share one creation through a
-per-token latch, and its waiters share its value or error. A caller's context
-bounds only that caller's wait: the creation keeps running and other waiters
-are unaffected.
+per-token latch, and its waiters share its value or error. (That a caller's
+context bounds only its own wait is P13.)
 
 - Go API: `Container.Resolve` from many goroutines.
 - Across goroutines, a resolve about to wait on another creation first walks
@@ -310,10 +322,15 @@ run under, and waits for in-flight creations, bounded by its context.
 - Go API: `Container.Teardown`, `Container.Wait`, `*TeardownTimeoutError`.
 - A creation finishing during that wait, singleton or transient, is never
   cached or returned: its callers get `ErrClosing` and its value is cleaned in
-  the same pass. Such a transient never claims or demotes an owner. If a
-  singleton then finishes with the same value during the same wait, the
-  singleton owns it, takes over the transient's token (a *takeover*), and the
-  transient closes nothing.
+  the same pass. Such a transient is kept only for its own cleanup and never
+  claims or demotes an owner: it closes nothing when it is `KeepOpen` or
+  another creation already owns its value, and otherwise closes the value
+  once. If a singleton then finishes with the same value during the same wait,
+  the singleton owns it and closes it at its own slot, takes over the
+  transient's token (a *takeover*), so a running creation that imported that
+  transient still holds the value back, and the transient closes nothing.
+  After the wait the transient stays the owner, so a late creation returning
+  the value closes nothing.
 - If the wait times out, the remaining creations are *late*. Each late
   creation cleans its own value when it finishes; the values the late
   creations import are held back and cleaned once, after the last of them, and
@@ -340,6 +357,8 @@ context, not a caller's. It carries none of the caller's values and is
 cancelled only when Teardown begins, never by the `NewContainer` ctx, so a
 signal context ending at the start of a graceful drain fails no creation.
 Transient creators run on the caller's goroutine under the caller's context.
+A caller's context bounds only that caller's wait: the creation keeps running
+and other waiters are unaffected.
 
 - Go API: `NewContainer(ctx, ...)` (ctx is not retained), `Creator`'s ctx.
 
@@ -363,7 +382,10 @@ Resolver fails with `ErrObserverResolve` and is counted.
   `Stats.ObserverPanics`, and disables the observer for the container's life.
 - Observer failures never change a resolve's or a teardown's result; they are
   visible only in `Stats`, except that an abandoned drainer or an overrunning
-  Flush holds back the observer set (P17, P20).
+  Flush holds back the observer set, which Teardown then reports by returning
+  `*TeardownTimeoutError` with the set in `HeldBack` (P17, P20).
+- The drainer goroutine exits only in Teardown, so a container with an
+  observer must be torn down.
 - A second `WithObserver` panics.
 
 Pinned by:
@@ -405,7 +427,8 @@ Pinned by:
 ## P16 The observer's Resolver is enforced
 
 The observer's Resolver refuses transients, serves cache hits only until the
-first resolve that is not the observer's ("during Apply") and again while
+first resolve that is not the observer's (the window the tests call "during
+Apply", though it is set by that first resolve, not by Apply) and again while
 Teardown is closing, and refuses everything after closed. Refusals match
 `ErrObserverResolve`; a cache miss also matches `ErrNotResolved`, and a refusal
 after closed also matches `ErrClosing`.
@@ -465,8 +488,9 @@ container's abort context, cancelled when Closing begins. A value that must
 outlive Closing, such as a background flusher, takes `Lifetime(deps)`.
 
 - Go API: `Lifetime`, `Deps`.
-- A singleton's `Lifetime` ends right after its own cleanup slot (also when it
-  has no closer), and at once if its creation fails. An alias's `Lifetime`
+- A singleton's `Lifetime` ends after its own cleanup slot (also when it has
+  no closer): right after it in the main pass, later if the value is held back
+  or in the observer set, and at once if its creation fails. An alias's `Lifetime`
   ends no earlier than its owner's cleanup.
 - Every transient shares one `Lifetime`, the container's, which ends once
   every cleanup the container owns has run.
@@ -500,7 +524,15 @@ the last finisher.
   runtime import closure from this and every later pass.
 - Hold-back follows import tokens and value identity: a creation that received
   an owned value through a transient holds back the value's owner, and a
-  held-back alias holds back its owner.
+  held-back alias holds back its owner. Identity is recorded only once a
+  creation owns the value: a value a transient handed to a running creation
+  before any singleton owned it is not held back when a singleton later claims
+  it, and is closed in the main pass. Have the transient import that
+  singleton, or resolve the singleton before the transient hands the value
+  out, so the hold follows the import. The link is per token, so a transient
+  token that ever returned an owned value holds that owner for every running
+  importer of the token, even one that received a different value: that
+  over-holds, never closes early.
 - The held-back values and each late creation's own value are cleaned under a
   context Teardown's cancellation never reaches, off the caller's goroutine.
   `Wait` blocks until every late call, late Flush and late creation has
@@ -537,8 +569,11 @@ each get one such allowance.
   finish; `Wait` waits for it but never reports its result.
 - An abandoned `OnEvent` or an overrunning Flush may still be using the
   observer set, so the set and its closure are held back and listed in
-  `*TeardownTimeoutError`'s `HeldBack`, while the `closed` event lists them in
-  `Remaining`.
+  `*TeardownTimeoutError`'s `HeldBack`; the `closed` event, queued before the
+  drainer stop, lists them in `Remaining`, not `HeldBack`, when it is delivered
+  at all. They are cleaned once, after that `OnEvent` returns and the drainer
+  exits or that Flush returns, by the last participant under the late context;
+  `Wait` waits for that.
 
 Pinned by:
 
@@ -597,7 +632,7 @@ reach every sentinel and carrier through `*CreatorError` (which unwraps to its
 | `ErrWireNotRegistered` | — | A token never bound, or a wire the observer requires is unbound (P1, P16) |
 | `ErrNotResolved` | — | `GetCached` of a transient or an uncreated singleton; an observer cache miss |
 | `ErrNotImported` | — | `Dep` of a wire that is not a declared import |
-| `ErrClosing` | — | A resolve once Teardown has begun (P9, P12) |
+| `ErrClosing` | — | A resolve once Teardown has begun, other than what the observer's Resolver may still serve (P9, P12, P16) |
 | `ErrTeardownTimeout` | `*TeardownTimeoutError` (`Running`, `HeldBack`, `Cleanups`) | Teardown stopped waiting for creations or calls (P19, P20) |
 | `ErrCreator` | `*CreatorError` (`Label`, `Cause`) | A creator that failed or panicked, including one whose import failed (P5) |
 | `ErrObserverResolve` | — | A resolve the observer's Resolver refuses (P14, P16) |
