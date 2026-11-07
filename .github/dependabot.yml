@@ -1,0 +1,21 @@
+version: 2
+updates:
+  # Workflow actions are pinned to commit SHAs with a version comment;
+  # Dependabot bumps both together.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns: ["*"]
+
+  # The module has no dependencies; this entry watches go.mod in case it
+  # ever gains one. CI tools run through go run and are bumped by hand.
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      go-modules:
+        patterns: ["*"]
