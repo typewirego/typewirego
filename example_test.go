@@ -31,10 +31,33 @@ var storeWire = typewirego.Of(typewirego.Opts[*Store]{
 })
 
 func ExampleOf() {
+	type Config struct{ DSN string }
+	type Store struct{ DSN string }
+
+	// Wires are package-level values in a real service.
+	configWire := typewirego.Of(typewirego.Opts[*Config]{
+		Token: "app.Config",
+		Creator: func(context.Context) (*Config, error) {
+			return &Config{DSN: "postgres://localhost/app"}, nil
+		},
+	})
+	storeWire := typewirego.Of(typewirego.Opts[*Store]{
+		Token:   "app.Store",
+		Imports: []typewirego.Import{{Name: "config", Wire: configWire}},
+		CreateWith: func(_ context.Context, deps typewirego.Deps, _ typewirego.Resolver) (*Store, error) {
+			cfg, err := typewirego.Dep(deps, configWire)
+			if err != nil {
+				return nil, err
+			}
+			return &Store{DSN: cfg.DSN}, nil
+		},
+	})
+
 	ctx := context.Background()
 	c := typewirego.NewContainer(ctx)
 	defer c.Teardown(ctx)
 
+	// Apply binds the store and, first, its import.
 	if err := storeWire.Apply(c); err != nil {
 		panic(err)
 	}
@@ -43,7 +66,7 @@ func ExampleOf() {
 		panic(err)
 	}
 	again, _ := storeWire.GetInstance(ctx, c)
-	fmt.Println(store.dsn)
+	fmt.Println(store.DSN)
 	fmt.Println(store == again)
 	// Output:
 	// postgres://localhost/app
