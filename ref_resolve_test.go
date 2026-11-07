@@ -91,8 +91,7 @@ func TestCreatorGoexitReleasesLatch(t *testing.T) {
 func TestCreatorResolverOutlivesItsCreatorWithoutAFalseCycle(t *testing.T) {
 	var kept typewirego.Resolver
 	other := leafWire("t.Other")
-	var x typewirego.TypeWire[string]
-	x = typewirego.Of(typewirego.Opts[string]{Token: "t.X",
+	x := typewirego.Of(typewirego.Opts[string]{Token: "t.X",
 		CreateWith: func(_ context.Context, _ typewirego.Deps, r typewirego.Resolver) (string, error) {
 			kept = r
 			return "x", nil

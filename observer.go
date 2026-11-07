@@ -250,7 +250,7 @@ func (r *observerResolver) Resolve(ctx context.Context, t Token) (any, error) {
 }
 
 func (r *observerResolver) GetCached(t Token) (any, error) {
-	return r.c.observerResolve(nil, t, true)
+	return r.c.observerResolve(context.Background(), t, true)
 }
 
 func (c *Container) refuseLocked(t Token, also error) error {

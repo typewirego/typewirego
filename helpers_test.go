@@ -40,15 +40,6 @@ func waitClosed(t *testing.T, ch <-chan struct{}, what string) {
 	}
 }
 
-func notClosed(t *testing.T, ch <-chan struct{}, what string) {
-	t.Helper()
-	select {
-	case <-ch:
-		t.Fatalf("%s happened too early", what)
-	default:
-	}
-}
-
 // eventually polls cond; it is for observing state another goroutine settles,
 // never for ordering goroutines.
 func eventually(t *testing.T, what string, cond func() bool) {

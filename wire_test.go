@@ -101,9 +101,6 @@ func TestTokensCompareByIdentity(t *testing.T) {
 	if a.Token() == b.Token() {
 		t.Fatal("two wires with one label share a token")
 	}
-	if a.Token() != a.Token() {
-		t.Fatal("a token differs from itself")
-	}
 	var zero typewirego.Token
 	if zero.Label() != "" {
 		t.Fatal("zero token has a label")
