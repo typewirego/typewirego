@@ -1,0 +1,1964 @@
+{
+  "description": "Typewire conformance cases (design doc A1 rules P1-P10, A4). Each language's driver runs every case against its own typewire library. P11-P20 are native Go rules, met by the tests named in native_tests.json. Error classes are contractual; message text is not.",
+  "languages": [
+    "go",
+    "python",
+    "typescript"
+  ],
+  "rationales": [
+    "introspection",
+    "capability-absent",
+    "python-narrowing-deferred",
+    "q9-declined",
+    "reference-bug"
+  ],
+  "ops": {
+    "state": "A case owns one fresh container. Each define adds a wire under a case-local id; override replaces the wire held for an id with an override of it. Drivers count creator calls per id (the override's creator counts under '<id>.override') and log cleanups in the order they run.",
+    "define": "id, label, creator; optional scope, imports, resolves, value, cleanup. Creates a wire with a new token labelled label (two defines never share a token, even with one label). id matches ^[a-z][a-z0-9_]*$ and is defined once. scope is singleton (default) or transient. imports lists ids defined earlier, resolved in order before the creator runs. creator: ok returns a fresh value, compared by identity, whose cleanup appends id to the cleanup log; fail raises; value returns the JSON value in value and has no cleanup. resolves lists ids the creator resolves through its resolver cutout when it runs, after its imports (Go: the Resolver argument; TypeScript: the resolution context; Python: the container's resolve). cleanup (only with creator ok) is ok (default) or fail: the cleanup still logs, then fails.",
+    "override": "id, keep_imports. Replaces the wire for id with its override (with_creator / withCreator / WithCreator), keeping the token. The override's creator never calls the original and behaves as creator ok. keep_imports true keeps the original's imports declared (every language); false drops them (Python's one-argument with_creator only).",
+    "apply": "ids. Applies the current wires for ids, in order, as one group.",
+    "resolve": "id; optional expect_calls, expect_same_as, expect_error, expect_path. Resolves the current wire for id. expect_calls: the id's original creator has run this many times after the resolve. expect_same_as: the value is the same object as the last value resolved for that id. expect_path (only with expect_error cycle): the cycle's token labels from the first entry to the repeat.",
+    "teardown": "Optional expect_error (only cleanup) and expect_failed (ids whose cleanups failed, in any order). Tears the container down.",
+    "creator_calls": "expect: a map from id, or '<id>.override', to the creator calls so far. Only the listed keys are compared.",
+    "cleanup_order": "expect: the full cleanup log so far, in order.",
+    "graph": "expect_nodes, expect_edges. The container's graph after the ops so far. Nodes compare as a set, one per token: {id, label, scope, created, overridden}, where overridden means bound again after an override. Edges compare as a set: {from, to}, from the import to the importer, as in A2's DOT.",
+    "expect_error": "cycle | not_registered | creator | closing | cleanup, matched against the error chain (Go: errors.Is through CreatorError and errors.Join): cycle is a circular dependency anywhere in the chain; not_registered a token never registered; closing a resolve on a container that has begun teardown; creator a creator failure, including a failed import; cleanup a teardown that returns cleanup errors.",
+    "unknown": "A driver fails on an unknown op, an unknown key in an operation or case, or languages without a permitted rationale. Cases excluded from a language by languages are not executed there."
+  },
+  "cases": [
+    {
+      "name": "applying a wire registers its imports recursively",
+      "rules": [
+        "P1"
+      ],
+      "operations": [
+        {
+          "op": "define",
+          "id": "leaf",
+          "label": "t.Leaf",
+          "creator": "ok"
+        },
+        {
+          "op": "define",
+          "id": "mid",
+          "label": "t.Mid",
+          "creator": "ok",
+          "imports": [
+            "leaf"
+          ]
+        },
+        {
+          "op": "define",
+          "id": "top",
+          "label": "t.Top",
+          "creator": "ok",
+          "imports": [
+            "mid"
+          ]
+        },
+        {
+          "op": "apply",
+          "ids": [
+            "top"
+          ]
+        },
+        {
+          "op": "resolve",
+          "id": "leaf",
+          "expect_calls": 1
+        },
+        {
+          "op": "resolve",
+          "id": "mid",
+          "expect_calls": 1
+        },
+        {
+          "op": "creator_calls",
+          "expect": {
+            "leaf": 1,
+            "mid": 1,
+            "top": 0
+          }
+        }
+      ]
+    },
+    {
+      "name": "a wire that was never applied is not registered",
+      "rules": [
+        "P1"
+      ],
+      "operations": [
+        {
+          "op": "define",
+          "id": "dep",
+          "label": "t.Dep",
+          "creator": "ok"
+        },
+        {
+          "op": "define",
+          "id": "svc",
+          "label": "t.Svc",
+          "creator": "ok",
+          "imports": [
+            "dep"
+          ]
+        },
+        {
+          "op": "define",
+          "id": "other",
+          "label": "t.Other",
+          "creator": "ok"
+        },
+        {
+          "op": "apply",
+          "ids": [
+            "dep"
+          ]
+        },
+        {
+          "op": "resolve",
+          "id": "svc",
+          "expect_error": "not_registered"
+        },
+        {
+          "op": "resolve",
+          "id": "other",
+          "expect_error": "not_registered"
+        },
+        {
+          "op": "creator_calls",
+          "expect": {
+            "dep": 0,
+            "svc": 0,
+            "other": 0
+          }
+        }
+      ]
+    },
+    {
+      "name": "two wires with one label are two tokens",
+      "rules": [
+        "P1"
+      ],
+      "operations": [
+        {
+          "op": "define",
+          "id": "first",
+          "label": "t.Shared",
+          "creator": "ok"
+        },
+        {
+          "op": "define",
+          "id": "second",
+          "label": "t.Shared",
+          "creator": "ok"
+        },
+        {
+          "op": "apply",
+          "ids": [
+            "first",
+            "second"
+          ]
+        },
+        {
+          "op": "resolve",
+          "id": "first",
+          "expect_calls": 1
+        },
+        {
+          "op": "creator_calls",
+          "expect": {
+            "first": 1,
+            "second": 0
+          }
+        },
+        {
+          "op": "resolve",
+          "id": "second",
+          "expect_calls": 1
+        },
+        {
+          "op": "resolve",
+          "id": "first",
+          "expect_calls": 1,
+          "expect_same_as": "first"
+        }
+      ]
+    },
+    {
+      "name": "an override applied after the original, before any resolve, wins",
+      "rules": [
+        "P1",
+        "P6"
+      ],
+      "operations": [
+        {
+          "op": "define",
+          "id": "w",
+          "label": "t.W",
+          "creator": "ok"
+        },
+        {
+          "op": "apply",
+          "ids": [
+            "w"
+          ]
+        },
+        {
+          "op": "override",
+          "id": "w",
+          "keep_imports": true
+        },
+        {
+          "op": "apply",
+          "ids": [
+            "w"
+          ]
+        },
+        {
+          "op": "resolve",
+          "id": "w",
+          "expect_calls": 0
+        },
+        {
+          "op": "creator_calls",
+          "expect": {
+            "w": 0,
+            "w.override": 1
+          }
+        }
+      ]
+    },
+    {
+      "name": "an import is looked up at resolve time, so a later override of it is used",
+      "rules": [
+        "P1"
+      ],
+      "operations": [
+        {
+          "op": "define",
+          "id": "dep",
+          "label": "t.Dep",
+          "creator": "ok"
+        },
+        {
+          "op": "define",
+          "id": "svc",
+          "label": "t.Svc",
+          "creator": "ok",
+          "imports": [
+            "dep"
+          ]
+        },
+        {
+          "op": "apply",
+          "ids": [
+            "svc"
+          ]
+        },
+        {
+          "op": "override",
+          "id": "dep",
+          "keep_imports": true
+        },
+        {
+          "op": "apply",
+          "ids": [
+            "dep"
+          ]
+        },
+        {
+          "op": "resolve",
+          "id": "svc",
+          "expect_calls": 1
+        },
+        {
+          "op": "creator_calls",
+          "expect": {
+            "dep": 0,
+            "dep.override": 1
+          }
+        }
+      ]
+    },
+    {
+      "name": "an override keeps the original's imports registered",
+      "rules": [
+        "P1"
+      ],
+      "operations": [
+        {
+          "op": "define",
+          "id": "dep",
+          "label": "t.Dep",
+          "creator": "ok"
+        },
+        {
+          "op": "define",
+          "id": "svc",
+          "label": "t.Svc",
+          "creator": "ok",
+          "imports": [
+            "dep"
+          ]
+        },
+        {
+          "op": "override",
+          "id": "svc",
+          "keep_imports": true
+        },
+        {
+          "op": "apply",
+          "ids": [
+            "svc"
+          ]
+        },
+        {
+          "op": "resolve",
+          "id": "dep",
+          "expect_calls": 1
+        }
+      ]
+    },
+    {
+      "name": "an override that never calls the original does not resolve the original's imports",
+      "rules": [
+        "P1"
+      ],
+      "operations": [
+        {
+          "op": "define",
+          "id": "dep",
+          "label": "t.Dep",
+          "creator": "ok"
+        },
+        {
+          "op": "define",
+          "id": "svc",
+          "label": "t.Svc",
+          "creator": "ok",
+          "imports": [
+            "dep"
+          ]
+        },
+        {
+          "op": "override",
+          "id": "svc",
+          "keep_imports": true
+        },
+        {
+          "op": "apply",
+          "ids": [
+            "svc"
+          ]
+        },
+        {
+          "op": "resolve",
+          "id": "svc",
+          "expect_calls": 0
+        },
+        {
+          "op": "creator_calls",
+          "expect": {
+            "dep": 0,
+            "svc": 0,
+            "svc.override": 1
+          }
+        },
+        {
+          "op": "resolve",
+          "id": "dep",
+          "expect_calls": 1
+        }
+      ]
+    },
+    {
+      "name": "a one-argument override drops the original's imports",
+      "rules": [
+        "P1"
+      ],
+      "operations": [
+        {
+          "op": "define",
+          "id": "dep",
+          "label": "t.Dep",
+          "creator": "ok"
+        },
+        {
+          "op": "define",
+          "id": "svc",
+          "label": "t.Svc",
+          "creator": "ok",
+          "imports": [
+            "dep"
+          ]
+        },
+        {
+          "op": "override",
+          "id": "svc",
+          "keep_imports": false
+        },
+        {
+          "op": "apply",
+          "ids": [
+            "svc"
+          ]
+        },
+        {
+          "op": "resolve",
+          "id": "dep",
+          "expect_error": "not_registered"
+        },
+        {
+          "op": "resolve",
+          "id": "svc"
+        },
+        {
+          "op": "creator_calls",
+          "expect": {
+            "dep": 0,
+            "svc": 0,
+            "svc.override": 1
+          }
+        }
+      ],
+      "languages": [
+        "python"
+      ],
+      "rationale": "introspection"
+    },
+    {
+      "name": "apply runs no creator",
+      "rules": [
+        "P2"
+      ],
+      "operations": [
+        {
+          "op": "define",
+          "id": "leaf",
+          "label": "t.Leaf",
+          "creator": "ok"
+        },
+        {
+          "op": "define",
+          "id": "top",
+          "label": "t.Top",
+          "creator": "ok",
+          "imports": [
+            "leaf"
+          ]
+        },
+        {
+          "op": "define",
+          "id": "each",
+          "label": "t.Each",
+          "creator": "ok",
+          "scope": "transient"
+        },
+        {
+          "op": "define",
+          "id": "broken",
+          "label": "t.Broken",
+          "creator": "fail"
+        },
+        {
+          "op": "apply",
+          "ids": [
+            "top",
+            "each",
+            "broken"
+          ]
+        },
+        {
+          "op": "creator_calls",
+          "expect": {
+            "leaf": 0,
+            "top": 0,
+            "each": 0,
+            "broken": 0
+          }
+        }
+      ]
+    },
+    {
+      "name": "the first resolve runs only the creators it needs",
+      "rules": [
+        "P2"
+      ],
+      "operations": [
+        {
+          "op": "define",
+          "id": "a",
+          "label": "t.A",
+          "creator": "ok"
+        },
+        {
+          "op": "define",
+          "id": "b",
+          "label": "t.B",
+          "creator": "ok"
+        },
+        {
+          "op": "define",
+          "id": "top",
+          "label": "t.Top",
+          "creator": "ok",
+          "imports": [
+            "a"
+          ]
+        },
+        {
+          "op": "apply",
+          "ids": [
+            "top",
+            "b"
+          ]
+        },
+        {
+          "op": "resolve",
+          "id": "top",
+          "expect_calls": 1
+        },
+        {
+          "op": "creator_calls",
+          "expect": {
+            "a": 1,
+            "top": 1,
+            "b": 0
+          }
+        }
+      ]
+    },
+    {
+      "name": "a singleton is created once and later resolves return the cache",
+      "rules": [
+        "P3"
+      ],
+      "operations": [
+        {
+          "op": "define",
+          "id": "s",
+          "label": "t.S",
+          "creator": "ok"
+        },
+        {
+          "op": "apply",
+          "ids": [
+            "s"
+          ]
+        },
+        {
+          "op": "resolve",
+          "id": "s",
+          "expect_calls": 1
+        },
+        {
+          "op": "resolve",
+          "id": "s",
+          "expect_calls": 1,
+          "expect_same_as": "s"
+        },
+        {
+          "op": "resolve",
+          "id": "s",
+          "expect_calls": 1,
+          "expect_same_as": "s"
+        }
+      ]
+    },
+    {
+      "name": "a singleton shared by two importers is created once",
+      "rules": [
+        "P3",
+        "P7"
+      ],
+      "operations": [
+        {
+          "op": "define",
+          "id": "base",
+          "label": "t.Base",
+          "creator": "ok"
+        },
+        {
+          "op": "define",
+          "id": "left",
+          "label": "t.Left",
+          "creator": "ok",
+          "imports": [
+            "base"
+          ]
+        },
+        {
+          "op": "define",
+          "id": "right",
+          "label": "t.Right",
+          "creator": "ok",
+          "imports": [
+            "base"
+          ]
+        },
+        {
+          "op": "define",
+          "id": "top",
+          "label": "t.Top",
+          "creator": "ok",
+          "imports": [
+            "left",
+            "right"
+          ]
+        },
+        {
+          "op": "apply",
+          "ids": [
+            "top"
+          ]
+        },
+        {
+          "op": "resolve",
+          "id": "top",
+          "expect_calls": 1
+        },
+        {
+          "op": "resolve",
+          "id": "base",
+          "expect_calls": 1
+        },
+        {
+          "op": "creator_calls",
+          "expect": {
+            "base": 1,
+            "left": 1,
+            "right": 1,
+            "top": 1
+          }
+        }
+      ]
+    },
+    {
+      "name": "a singleton whose value is falsy is still cached",
+      "rules": [
+        "P3"
+      ],
+      "operations": [
+        {
+          "op": "define",
+          "id": "zero",
+          "label": "t.Zero",
+          "creator": "value",
+          "value": 0
+        },
+        {
+          "op": "define",
+          "id": "empty",
+          "label": "t.Empty",
+          "creator": "value",
+          "value": ""
+        },
+        {
+          "op": "define",
+          "id": "no",
+          "label": "t.No",
+          "creator": "value",
+          "value": false
+        },
+        {
+          "op": "define",
+          "id": "nothing",
+          "label": "t.Nothing",
+          "creator": "value",
+          "value": null
+        },
+        {
+          "op": "apply",
+          "ids": [
+            "zero",
+            "empty",
+            "no",
+            "nothing"
+          ]
+        },
+        {
+          "op": "resolve",
+          "id": "zero",
+          "expect_calls": 1
+        },
+        {
+          "op": "resolve",
+          "id": "zero",
+          "expect_calls": 1
+        },
+        {
+          "op": "resolve",
+          "id": "empty",
+          "expect_calls": 1
+        },
+        {
+          "op": "resolve",
+          "id": "empty",
+          "expect_calls": 1
+        },
+        {
+          "op": "resolve",
+          "id": "no",
+          "expect_calls": 1
+        },
+        {
+          "op": "resolve",
+          "id": "no",
+          "expect_calls": 1
+        },
+        {
+          "op": "resolve",
+          "id": "nothing",
+          "expect_calls": 1
+        },
+        {
+          "op": "resolve",
+          "id": "nothing",
+          "expect_calls": 1
+        }
+      ]
+    },
+    {
+      "name": "a transient runs its creator on every resolve",
+      "rules": [
+        "P4"
+      ],
+      "operations": [
+        {
+          "op": "define",
+          "id": "t",
+          "label": "t.T",
+          "creator": "ok",
+          "scope": "transient"
+        },
+        {
+          "op": "apply",
+          "ids": [
+            "t"
+          ]
+        },
+        {
+          "op": "resolve",
+          "id": "t",
+          "expect_calls": 1
+        },
+        {
+          "op": "resolve",
+          "id": "t",
+          "expect_calls": 2
+        },
+        {
+          "op": "resolve",
+          "id": "t",
+          "expect_calls": 3
+        }
+      ]
+    },
+    {
+      "name": "a singleton importing a transient captures one instance",
+      "rules": [
+        "P4",
+        "P3"
+      ],
+      "operations": [
+        {
+          "op": "define",
+          "id": "t",
+          "label": "t.T",
+          "creator": "ok",
+          "scope": "transient"
+        },
+        {
+          "op": "define",
+          "id": "s",
+          "label": "t.S",
+          "creator": "ok",
+          "imports": [
+            "t"
+          ]
+        },
+        {
+          "op": "apply",
+          "ids": [
+            "s"
+          ]
+        },
+        {
+          "op": "resolve",
+          "id": "s",
+          "expect_calls": 1
+        },
+        {
+          "op": "resolve",
+          "id": "s",
+          "expect_calls": 1,
+          "expect_same_as": "s"
+        },
+        {
+          "op": "creator_calls",
+          "expect": {
+            "t": 1
+          }
+        },
+        {
+          "op": "resolve",
+          "id": "t",
+          "expect_calls": 2
+        }
+      ]
+    },
+    {
+      "name": "a transient importing a singleton reuses the cached singleton",
+      "rules": [
+        "P4",
+        "P3"
+      ],
+      "operations": [
+        {
+          "op": "define",
+          "id": "s",
+          "label": "t.S",
+          "creator": "ok"
+        },
+        {
+          "op": "define",
+          "id": "t",
+          "label": "t.T",
+          "creator": "ok",
+          "scope": "transient",
+          "imports": [
+            "s"
+          ]
+        },
+        {
+          "op": "apply",
+          "ids": [
+            "t"
+          ]
+        },
+        {
+          "op": "resolve",
+          "id": "t",
+          "expect_calls": 1
+        },
+        {
+          "op": "resolve",
+          "id": "t",
+          "expect_calls": 2
+        },
+        {
+          "op": "creator_calls",
+          "expect": {
+            "s": 1
+          }
+        }
+      ]
+    },
+    {
+      "name": "a failed creation is retried on the next resolve",
+      "rules": [
+        "P5"
+      ],
+      "operations": [
+        {
+          "op": "define",
+          "id": "f",
+          "label": "t.F",
+          "creator": "fail"
+        },
+        {
+          "op": "apply",
+          "ids": [
+            "f"
+          ]
+        },
+        {
+          "op": "resolve",
+          "id": "f",
+          "expect_error": "creator",
+          "expect_calls": 1
+        },
+        {
+          "op": "resolve",
+          "id": "f",
+          "expect_error": "creator",
+          "expect_calls": 2
+        }
+      ]
+    },
+    {
+      "name": "a failed import fails the importer without running its creator",
+      "rules": [
+        "P5"
+      ],
+      "operations": [
+        {
+          "op": "define",
+          "id": "f",
+          "label": "t.F",
+          "creator": "fail"
+        },
+        {
+          "op": "define",
+          "id": "p",
+          "label": "t.P",
+          "creator": "ok",
+          "imports": [
+            "f"
+          ]
+        },
+        {
+          "op": "apply",
+          "ids": [
+            "p"
+          ]
+        },
+        {
+          "op": "resolve",
+          "id": "p",
+          "expect_error": "creator",
+          "expect_calls": 0
+        },
+        {
+          "op": "resolve",
+          "id": "p",
+          "expect_error": "creator",
+          "expect_calls": 0
+        },
+        {
+          "op": "creator_calls",
+          "expect": {
+            "f": 2
+          }
+        }
+      ]
+    },
+    {
+      "name": "a failed creation caches nothing, so an override applied afterwards takes effect",
+      "rules": [
+        "P5",
+        "P6"
+      ],
+      "operations": [
+        {
+          "op": "define",
+          "id": "f",
+          "label": "t.F",
+          "creator": "fail"
+        },
+        {
+          "op": "apply",
+          "ids": [
+            "f"
+          ]
+        },
+        {
+          "op": "resolve",
+          "id": "f",
+          "expect_error": "creator",
+          "expect_calls": 1
+        },
+        {
+          "op": "override",
+          "id": "f",
+          "keep_imports": true
+        },
+        {
+          "op": "apply",
+          "ids": [
+            "f"
+          ]
+        },
+        {
+          "op": "resolve",
+          "id": "f",
+          "expect_calls": 1
+        },
+        {
+          "op": "resolve",
+          "id": "f",
+          "expect_calls": 1,
+          "expect_same_as": "f"
+        },
+        {
+          "op": "creator_calls",
+          "expect": {
+            "f.override": 1
+          }
+        }
+      ]
+    },
+    {
+      "name": "an override applied after the singleton is cached has no effect",
+      "rules": [
+        "P6"
+      ],
+      "operations": [
+        {
+          "op": "define",
+          "id": "w",
+          "label": "t.W",
+          "creator": "ok"
+        },
+        {
+          "op": "apply",
+          "ids": [
+            "w"
+          ]
+        },
+        {
+          "op": "resolve",
+          "id": "w",
+          "expect_calls": 1
+        },
+        {
+          "op": "override",
+          "id": "w",
+          "keep_imports": true
+        },
+        {
+          "op": "apply",
+          "ids": [
+            "w"
+          ]
+        },
+        {
+          "op": "resolve",
+          "id": "w",
+          "expect_calls": 1,
+          "expect_same_as": "w"
+        },
+        {
+          "op": "creator_calls",
+          "expect": {
+            "w": 1,
+            "w.override": 0
+          }
+        }
+      ]
+    },
+    {
+      "name": "an override of an import applied after the importer is cached leaves the importer's value alone",
+      "rules": [
+        "P6"
+      ],
+      "operations": [
+        {
+          "op": "define",
+          "id": "dep",
+          "label": "t.Dep",
+          "creator": "ok"
+        },
+        {
+          "op": "define",
+          "id": "svc",
+          "label": "t.Svc",
+          "creator": "ok",
+          "imports": [
+            "dep"
+          ]
+        },
+        {
+          "op": "apply",
+          "ids": [
+            "svc"
+          ]
+        },
+        {
+          "op": "resolve",
+          "id": "svc",
+          "expect_calls": 1
+        },
+        {
+          "op": "override",
+          "id": "dep",
+          "keep_imports": true
+        },
+        {
+          "op": "apply",
+          "ids": [
+            "dep"
+          ]
+        },
+        {
+          "op": "resolve",
+          "id": "dep",
+          "expect_calls": 1
+        },
+        {
+          "op": "resolve",
+          "id": "svc",
+          "expect_calls": 1,
+          "expect_same_as": "svc"
+        },
+        {
+          "op": "creator_calls",
+          "expect": {
+            "dep.override": 0
+          }
+        }
+      ]
+    },
+    {
+      "name": "a runtime resolve that closes a cycle fails with cycle and the label path",
+      "rules": [
+        "P7"
+      ],
+      "operations": [
+        {
+          "op": "define",
+          "id": "a",
+          "label": "t.A",
+          "creator": "ok",
+          "resolves": [
+            "b"
+          ]
+        },
+        {
+          "op": "define",
+          "id": "b",
+          "label": "t.B",
+          "creator": "ok",
+          "resolves": [
+            "a"
+          ]
+        },
+        {
+          "op": "apply",
+          "ids": [
+            "a",
+            "b"
+          ]
+        },
+        {
+          "op": "resolve",
+          "id": "a",
+          "expect_error": "cycle",
+          "expect_path": [
+            "t.A",
+            "t.B",
+            "t.A"
+          ]
+        },
+        {
+          "op": "creator_calls",
+          "expect": {
+            "a": 1,
+            "b": 1
+          }
+        }
+      ]
+    },
+    {
+      "name": "a wire that resolves itself fails with cycle",
+      "rules": [
+        "P7"
+      ],
+      "operations": [
+        {
+          "op": "define",
+          "id": "self_ref",
+          "label": "t.Self",
+          "creator": "ok",
+          "resolves": [
+            "self_ref"
+          ]
+        },
+        {
+          "op": "apply",
+          "ids": [
+            "self_ref"
+          ]
+        },
+        {
+          "op": "resolve",
+          "id": "self_ref",
+          "expect_error": "cycle",
+          "expect_path": [
+            "t.Self",
+            "t.Self"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "a cycle through an import is reported from the importer",
+      "rules": [
+        "P7"
+      ],
+      "operations": [
+        {
+          "op": "define",
+          "id": "a",
+          "label": "t.A",
+          "creator": "ok",
+          "resolves": [
+            "c"
+          ]
+        },
+        {
+          "op": "define",
+          "id": "b",
+          "label": "t.B",
+          "creator": "ok",
+          "imports": [
+            "a"
+          ]
+        },
+        {
+          "op": "define",
+          "id": "c",
+          "label": "t.C",
+          "creator": "ok",
+          "resolves": [
+            "b"
+          ]
+        },
+        {
+          "op": "apply",
+          "ids": [
+            "b",
+            "c"
+          ]
+        },
+        {
+          "op": "resolve",
+          "id": "b",
+          "expect_error": "cycle",
+          "expect_path": [
+            "t.B",
+            "t.A",
+            "t.C",
+            "t.B"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "a runtime resolve without a cycle succeeds",
+      "rules": [
+        "P7"
+      ],
+      "operations": [
+        {
+          "op": "define",
+          "id": "dep",
+          "label": "t.Dep",
+          "creator": "ok"
+        },
+        {
+          "op": "define",
+          "id": "svc",
+          "label": "t.Svc",
+          "creator": "ok",
+          "resolves": [
+            "dep"
+          ]
+        },
+        {
+          "op": "apply",
+          "ids": [
+            "svc",
+            "dep"
+          ]
+        },
+        {
+          "op": "resolve",
+          "id": "svc",
+          "expect_calls": 1
+        },
+        {
+          "op": "resolve",
+          "id": "dep",
+          "expect_calls": 1
+        }
+      ]
+    },
+    {
+      "name": "teardown cleans created singletons in reverse creation order",
+      "rules": [
+        "P8"
+      ],
+      "operations": [
+        {
+          "op": "define",
+          "id": "leaf",
+          "label": "t.Leaf",
+          "creator": "ok"
+        },
+        {
+          "op": "define",
+          "id": "mid",
+          "label": "t.Mid",
+          "creator": "ok",
+          "imports": [
+            "leaf"
+          ]
+        },
+        {
+          "op": "define",
+          "id": "top",
+          "label": "t.Top",
+          "creator": "ok",
+          "imports": [
+            "mid"
+          ]
+        },
+        {
+          "op": "apply",
+          "ids": [
+            "top"
+          ]
+        },
+        {
+          "op": "resolve",
+          "id": "top"
+        },
+        {
+          "op": "teardown"
+        },
+        {
+          "op": "cleanup_order",
+          "expect": [
+            "top",
+            "mid",
+            "leaf"
+          ]
+        }
+      ],
+      "languages": [
+        "go",
+        "python"
+      ],
+      "rationale": "capability-absent"
+    },
+    {
+      "name": "teardown cleans each created value once and skips what was never created",
+      "rules": [
+        "P8"
+      ],
+      "operations": [
+        {
+          "op": "define",
+          "id": "base",
+          "label": "t.Base",
+          "creator": "ok"
+        },
+        {
+          "op": "define",
+          "id": "left",
+          "label": "t.Left",
+          "creator": "ok",
+          "imports": [
+            "base"
+          ]
+        },
+        {
+          "op": "define",
+          "id": "right",
+          "label": "t.Right",
+          "creator": "ok",
+          "imports": [
+            "base"
+          ]
+        },
+        {
+          "op": "define",
+          "id": "top",
+          "label": "t.Top",
+          "creator": "ok",
+          "imports": [
+            "left",
+            "right"
+          ]
+        },
+        {
+          "op": "define",
+          "id": "unused",
+          "label": "t.Unused",
+          "creator": "ok"
+        },
+        {
+          "op": "define",
+          "id": "broken",
+          "label": "t.Broken",
+          "creator": "fail"
+        },
+        {
+          "op": "apply",
+          "ids": [
+            "top",
+            "unused",
+            "broken"
+          ]
+        },
+        {
+          "op": "resolve",
+          "id": "top"
+        },
+        {
+          "op": "resolve",
+          "id": "top"
+        },
+        {
+          "op": "resolve",
+          "id": "base"
+        },
+        {
+          "op": "resolve",
+          "id": "broken",
+          "expect_error": "creator"
+        },
+        {
+          "op": "teardown"
+        },
+        {
+          "op": "cleanup_order",
+          "expect": [
+            "top",
+            "right",
+            "left",
+            "base"
+          ]
+        }
+      ],
+      "languages": [
+        "go",
+        "python"
+      ],
+      "rationale": "capability-absent"
+    },
+    {
+      "name": "teardown follows creation order, not apply order",
+      "rules": [
+        "P8"
+      ],
+      "operations": [
+        {
+          "op": "define",
+          "id": "first",
+          "label": "t.First",
+          "creator": "ok"
+        },
+        {
+          "op": "define",
+          "id": "second",
+          "label": "t.Second",
+          "creator": "ok"
+        },
+        {
+          "op": "apply",
+          "ids": [
+            "first",
+            "second"
+          ]
+        },
+        {
+          "op": "resolve",
+          "id": "second"
+        },
+        {
+          "op": "resolve",
+          "id": "first"
+        },
+        {
+          "op": "teardown"
+        },
+        {
+          "op": "cleanup_order",
+          "expect": [
+            "first",
+            "second"
+          ]
+        }
+      ],
+      "languages": [
+        "go",
+        "python"
+      ],
+      "rationale": "capability-absent"
+    },
+    {
+      "name": "teardown of a container that created nothing cleans nothing",
+      "rules": [
+        "P8"
+      ],
+      "operations": [
+        {
+          "op": "define",
+          "id": "s",
+          "label": "t.S",
+          "creator": "ok"
+        },
+        {
+          "op": "apply",
+          "ids": [
+            "s"
+          ]
+        },
+        {
+          "op": "teardown"
+        },
+        {
+          "op": "cleanup_order",
+          "expect": []
+        }
+      ],
+      "languages": [
+        "go",
+        "python"
+      ],
+      "rationale": "capability-absent"
+    },
+    {
+      "name": "a resolve after teardown fails with closing",
+      "rules": [
+        "P9"
+      ],
+      "operations": [
+        {
+          "op": "define",
+          "id": "s",
+          "label": "t.S",
+          "creator": "ok"
+        },
+        {
+          "op": "define",
+          "id": "later",
+          "label": "t.Later",
+          "creator": "ok"
+        },
+        {
+          "op": "apply",
+          "ids": [
+            "s",
+            "later"
+          ]
+        },
+        {
+          "op": "resolve",
+          "id": "s",
+          "expect_calls": 1
+        },
+        {
+          "op": "teardown"
+        },
+        {
+          "op": "resolve",
+          "id": "s",
+          "expect_error": "closing"
+        },
+        {
+          "op": "resolve",
+          "id": "later",
+          "expect_error": "closing"
+        },
+        {
+          "op": "creator_calls",
+          "expect": {
+            "s": 1,
+            "later": 0
+          }
+        }
+      ],
+      "languages": [
+        "go",
+        "python"
+      ],
+      "rationale": "capability-absent"
+    },
+    {
+      "name": "teardown reports every cleanup failure and still runs every cleanup",
+      "rules": [
+        "P10",
+        "P8"
+      ],
+      "operations": [
+        {
+          "op": "define",
+          "id": "a",
+          "label": "t.A",
+          "creator": "ok",
+          "cleanup": "fail"
+        },
+        {
+          "op": "define",
+          "id": "b",
+          "label": "t.B",
+          "creator": "ok"
+        },
+        {
+          "op": "define",
+          "id": "c",
+          "label": "t.C",
+          "creator": "ok",
+          "cleanup": "fail"
+        },
+        {
+          "op": "apply",
+          "ids": [
+            "a",
+            "b",
+            "c"
+          ]
+        },
+        {
+          "op": "resolve",
+          "id": "a"
+        },
+        {
+          "op": "resolve",
+          "id": "b"
+        },
+        {
+          "op": "resolve",
+          "id": "c"
+        },
+        {
+          "op": "teardown",
+          "expect_error": "cleanup",
+          "expect_failed": [
+            "a",
+            "c"
+          ]
+        },
+        {
+          "op": "cleanup_order",
+          "expect": [
+            "c",
+            "b",
+            "a"
+          ]
+        }
+      ],
+      "languages": [
+        "go",
+        "python"
+      ],
+      "rationale": "capability-absent"
+    },
+    {
+      "name": "teardown with no cleanup failure returns no error",
+      "rules": [
+        "P10"
+      ],
+      "operations": [
+        {
+          "op": "define",
+          "id": "a",
+          "label": "t.A",
+          "creator": "ok"
+        },
+        {
+          "op": "apply",
+          "ids": [
+            "a"
+          ]
+        },
+        {
+          "op": "resolve",
+          "id": "a"
+        },
+        {
+          "op": "teardown"
+        },
+        {
+          "op": "cleanup_order",
+          "expect": [
+            "a"
+          ]
+        }
+      ],
+      "languages": [
+        "go",
+        "python"
+      ],
+      "rationale": "capability-absent"
+    },
+    {
+      "name": "graph after apply lists declared nodes and import edges before any creator runs",
+      "rules": [
+        "P1",
+        "P2"
+      ],
+      "operations": [
+        {
+          "op": "define",
+          "id": "leaf",
+          "label": "t.Leaf",
+          "creator": "ok"
+        },
+        {
+          "op": "define",
+          "id": "mid",
+          "label": "t.Mid",
+          "creator": "ok",
+          "imports": [
+            "leaf"
+          ]
+        },
+        {
+          "op": "define",
+          "id": "top",
+          "label": "t.Top",
+          "creator": "ok",
+          "imports": [
+            "mid"
+          ]
+        },
+        {
+          "op": "define",
+          "id": "each",
+          "label": "t.Each",
+          "creator": "ok",
+          "scope": "transient"
+        },
+        {
+          "op": "apply",
+          "ids": [
+            "top",
+            "each"
+          ]
+        },
+        {
+          "op": "graph",
+          "expect_nodes": [
+            {
+              "id": "leaf",
+              "label": "t.Leaf",
+              "scope": "singleton",
+              "created": false,
+              "overridden": false
+            },
+            {
+              "id": "mid",
+              "label": "t.Mid",
+              "scope": "singleton",
+              "created": false,
+              "overridden": false
+            },
+            {
+              "id": "top",
+              "label": "t.Top",
+              "scope": "singleton",
+              "created": false,
+              "overridden": false
+            },
+            {
+              "id": "each",
+              "label": "t.Each",
+              "scope": "transient",
+              "created": false,
+              "overridden": false
+            }
+          ],
+          "expect_edges": [
+            {
+              "from": "leaf",
+              "to": "mid"
+            },
+            {
+              "from": "mid",
+              "to": "top"
+            }
+          ]
+        },
+        {
+          "op": "creator_calls",
+          "expect": {
+            "leaf": 0,
+            "mid": 0,
+            "top": 0,
+            "each": 0
+          }
+        },
+        {
+          "op": "resolve",
+          "id": "mid"
+        },
+        {
+          "op": "graph",
+          "expect_nodes": [
+            {
+              "id": "leaf",
+              "label": "t.Leaf",
+              "scope": "singleton",
+              "created": true,
+              "overridden": false
+            },
+            {
+              "id": "mid",
+              "label": "t.Mid",
+              "scope": "singleton",
+              "created": true,
+              "overridden": false
+            },
+            {
+              "id": "top",
+              "label": "t.Top",
+              "scope": "singleton",
+              "created": false,
+              "overridden": false
+            },
+            {
+              "id": "each",
+              "label": "t.Each",
+              "scope": "transient",
+              "created": false,
+              "overridden": false
+            }
+          ],
+          "expect_edges": [
+            {
+              "from": "leaf",
+              "to": "mid"
+            },
+            {
+              "from": "mid",
+              "to": "top"
+            }
+          ]
+        }
+      ],
+      "languages": [
+        "go"
+      ],
+      "rationale": "capability-absent"
+    },
+    {
+      "name": "graph renders two tokens with one label as two nodes",
+      "rules": [
+        "P1"
+      ],
+      "operations": [
+        {
+          "op": "define",
+          "id": "first",
+          "label": "service.Client",
+          "creator": "ok"
+        },
+        {
+          "op": "define",
+          "id": "second",
+          "label": "service.Client",
+          "creator": "ok"
+        },
+        {
+          "op": "define",
+          "id": "user",
+          "label": "service.User",
+          "creator": "ok",
+          "imports": [
+            "second"
+          ]
+        },
+        {
+          "op": "apply",
+          "ids": [
+            "first",
+            "user"
+          ]
+        },
+        {
+          "op": "graph",
+          "expect_nodes": [
+            {
+              "id": "first",
+              "label": "service.Client",
+              "scope": "singleton",
+              "created": false,
+              "overridden": false
+            },
+            {
+              "id": "second",
+              "label": "service.Client",
+              "scope": "singleton",
+              "created": false,
+              "overridden": false
+            },
+            {
+              "id": "user",
+              "label": "service.User",
+              "scope": "singleton",
+              "created": false,
+              "overridden": false
+            }
+          ],
+          "expect_edges": [
+            {
+              "from": "second",
+              "to": "user"
+            }
+          ]
+        }
+      ],
+      "languages": [
+        "go"
+      ],
+      "rationale": "capability-absent"
+    },
+    {
+      "name": "graph marks a wire bound again by an override as overridden",
+      "rules": [
+        "P1"
+      ],
+      "operations": [
+        {
+          "op": "define",
+          "id": "w",
+          "label": "t.W",
+          "creator": "ok"
+        },
+        {
+          "op": "define",
+          "id": "plain",
+          "label": "t.Plain",
+          "creator": "ok"
+        },
+        {
+          "op": "apply",
+          "ids": [
+            "w",
+            "plain"
+          ]
+        },
+        {
+          "op": "override",
+          "id": "w",
+          "keep_imports": true
+        },
+        {
+          "op": "apply",
+          "ids": [
+            "w"
+          ]
+        },
+        {
+          "op": "graph",
+          "expect_nodes": [
+            {
+              "id": "w",
+              "label": "t.W",
+              "scope": "singleton",
+              "created": false,
+              "overridden": true
+            },
+            {
+              "id": "plain",
+              "label": "t.Plain",
+              "scope": "singleton",
+              "created": false,
+              "overridden": false
+            }
+          ],
+          "expect_edges": []
+        }
+      ],
+      "languages": [
+        "go"
+      ],
+      "rationale": "capability-absent"
+    }
+  ]
+}

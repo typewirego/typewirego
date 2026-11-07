@@ -1,0 +1,71 @@
+{
+  "P11": [
+    "TestP11ConcurrentFirstResolveCreatesOnce",
+    "TestP11WaitersShareCreatorError",
+    "TestP11WaiterContextExpiryLeavesCreatorRunning",
+    "TestP11CallerCancelDoesNotFailOtherWaiters",
+    "TestP11TwoGoroutineCycleIsCircularDependencyError",
+    "TestP11CreatorPanicReleasesLatch"
+  ],
+  "P12": [
+    "TestP12TeardownRejectsNewResolvesWithErrClosing",
+    "TestP12TeardownCancelsInFlightCreators",
+    "TestP12CreationFinishingDuringWaitJoinsCleanupPass",
+    "TestP12TeardownWithExpiredContextAndRunningCreator",
+    "TestP12LateCreationCleanedOnceAndReportedByWait",
+    "TestP12TeardownIsSerialized"
+  ],
+  "P13": [
+    "TestP13SingletonCreatorRunsUnderContainerContext",
+    "TestP13CallerContextBoundsOnlyItsWait",
+    "TestP13TransientCreatorRunsUnderCallerContext"
+  ],
+  "P14": [
+    "TestP14ObserverFactoryReceivesResolverOnly",
+    "TestP14ObserverPanicIsRecoveredCountedAndDisables",
+    "TestP14ObserverErrorNeverAltersResolveOrTeardown",
+    "TestP14FactoryResolvingDuringNewContainerIsRecorded"
+  ],
+  "P15": [
+    "TestP15ObserverPullsSinkInsideFirstOnEvent",
+    "TestP15EventsDeliveredInSequenceNeverReentrant",
+    "TestP15FullQueueDropsAndCountsWithoutBlocking",
+    "TestP15ResolveOkPrecedesEventsUsingCachedValue",
+    "TestP15ClosingPrecedesCleanupAndClosedIsLast",
+    "TestP15OnEventNeverOverlapsFlush",
+    "TestP15EventOrderUnderConcurrentResolves"
+  ],
+  "P16": [
+    "TestP16ObserverResolverRejectsTransients",
+    "TestP16ObserverResolverServesCacheHitsOnlyDuringApply",
+    "TestP16ObserverResolverServesCacheHitsOnlyWhileClosing",
+    "TestP16ObserverResolverFailsAfterClosed",
+    "TestP16ObserverPullWaitsOnAnotherGoroutinesLatch",
+    "TestP16UnboundRequiredWireFailsFirstResolve"
+  ],
+  "P17": [
+    "TestP17ObserverSetCleanedLastAfterFlush",
+    "TestP17ObserverSetIncludesRuntimeImportClosure",
+    "TestP17TeardownWithSinkCreatedAfterService",
+    "TestP17HeldBackTokenExcludedFromObserverPass",
+    "TestP17UndeliveredEventCountsInStatsNotError"
+  ],
+  "P18": [
+    "TestP18ContainerContextCarriesNoCallerValues",
+    "TestP18CreatorAbortContextCancelledAtClosing",
+    "TestP18LifetimeContextEndsAfterOwnCleanup"
+  ],
+  "P19": [
+    "TestP19TeardownTimeoutWithRunningCreatorWhoseImportIsCached",
+    "TestP19TimeoutStillRunsWholeTeardownPath",
+    "TestP19LateCreatorCleansOnlyItsOwnValue",
+    "TestP19HeldBackClosureCleanedOnceByLastFinisher",
+    "TestP19CreationFinishingDuringWaitIsClosingFailure"
+  ],
+  "P20": [
+    "TestP20FlushBudgetIsQuarterOfRemainingTime",
+    "TestP20FlushBudgetUsesConfiguredValueWithoutDeadline",
+    "TestP20FlushBudgetSurvivesWaitTimeout",
+    "TestP20ObserverSetCleanupGetsSecondAllowance"
+  ]
+}
