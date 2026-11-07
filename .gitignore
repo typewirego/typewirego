@@ -1,0 +1,11 @@
+# direnv and devenv
+.direnv/
+.devenv*
+
+# coverage and other test output
+*.out
+coverage*
+
+# editors
+.idea/
+.vscode/
