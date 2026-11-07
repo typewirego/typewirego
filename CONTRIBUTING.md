@@ -3,9 +3,10 @@
 ## Prerequisites
 
 - Go 1.25 or newer, or
-- [Nix](https://nixos.org/download) with flakes: `nix develop` (or `direnv allow`, with
-  [nix-direnv](https://github.com/nix-community/nix-direnv)) gives you Go, `just`, `gh`
-  and `git`.
+- [Nix](https://nixos.org/download) with flakes: `nix develop --no-pure-eval` (or
+  `direnv allow`, with [nix-direnv](https://github.com/nix-community/nix-direnv)) gives
+  you Go, `just`, `gh` and `git`. The dev shell is built with devenv, which needs
+  `--no-pure-eval` to find the project directory.
 
 The module has no dependencies. The linters run through `go run` at pinned versions, so
 the first run downloads them.
@@ -25,7 +26,7 @@ Run this before every commit; CI runs the same steps:
 test -z "$(gofmt -l .)" && go vet ./... && go test -race -count=1 ./...
 ```
 
-With `just` (in the Nix dev shell):
+With `just` (in the Nix dev shell, or `nix develop --no-pure-eval -c just check`):
 
 ```bash
 just check   # fmt check, vet, staticcheck, tests under -race, govulncheck
