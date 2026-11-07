@@ -426,6 +426,7 @@ func (c *Container) Teardown(ctx context.Context) error {
 	c.mu.Lock()
 	if c.tdStarted {
 		done := c.tdDone
+		c.tdQueued++
 		c.mu.Unlock()
 		<-done
 		return nil
@@ -569,6 +570,13 @@ func (c *Container) runPass(bound context.Context, list []*inst, errs *[]error, 
 			continue
 		}
 		call := &cleanupCall{done: make(chan struct{})}
+		if fixed && !time.Now().Before(deadline) {
+			// Due to start after the pass's deadline: start it, but never
+			// wait for it.
+			c.mu.Lock()
+			c.abandonLocked(call, i, tt)
+			c.mu.Unlock()
+		}
 		go func(i *inst) {
 			err := c.callCloser(bound, i)
 			c.mu.Lock()
@@ -584,21 +592,30 @@ func (c *Container) runPass(bound context.Context, list []*inst, errs *[]error, 
 				c.participantDone()
 			}
 		}(i)
+		if call.abandoned {
+			continue
+		}
 		waitCall(call.done, bound, &fixed, &deadline)
 		c.mu.Lock()
 		if call.finished {
 			c.cleanupDoneLocked(i, call.err, time.Since(start), errs)
 		} else {
-			call.abandoned = true
-			c.participants++
-			tt.Cleanups = append(tt.Cleanups, i.label)
-			for h := range c.closureLocked(nil, []*inst{i}) {
-				if h != i && !h.cleaned {
-					c.heldBack[h] = true
-				}
-			}
+			c.abandonLocked(call, i, tt)
 		}
 		c.mu.Unlock()
+	}
+}
+
+// abandonLocked leaves a cleanup call to finish on its own: it is listed in
+// Cleanups and its runtime import closure is held back from every later pass.
+func (c *Container) abandonLocked(call *cleanupCall, i *inst, tt *TeardownTimeoutError) {
+	call.abandoned = true
+	c.participants++
+	tt.Cleanups = append(tt.Cleanups, i.label)
+	for h := range c.closureLocked(nil, []*inst{i}) {
+		if h != i && !h.cleaned {
+			c.heldBack[h] = true
+		}
 	}
 }
 

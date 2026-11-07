@@ -174,11 +174,12 @@ type recObserver struct {
 	flush   func(ctx context.Context) error
 	flushed atomic.Int32
 	inEvent atomic.Int32
+	inFlush atomic.Bool
 	overlap atomic.Bool
 }
 
 func (o *recObserver) OnEvent(e typewirego.Event) {
-	if o.inEvent.Add(1) != 1 {
+	if o.inEvent.Add(1) != 1 || o.inFlush.Load() {
 		o.overlap.Store(true)
 	}
 	defer o.inEvent.Add(-1)
@@ -196,6 +197,8 @@ func (o *recObserver) Flush(ctx context.Context) error {
 		o.overlap.Store(true)
 	}
 	o.flushed.Add(1)
+	o.inFlush.Store(true)
+	defer o.inFlush.Store(false)
 	if o.flush != nil {
 		return o.flush(ctx)
 	}

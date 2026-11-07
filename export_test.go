@@ -45,3 +45,32 @@ func SetBetweenEventsHook(c *Container, f func()) {
 	defer c.mu.Unlock()
 	c.obs.betweenEvents = f
 }
+
+// LatchWaiters is how many resolves wait on t's in-flight creation.
+func LatchWaiters(c *Container, t Token) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	s := c.slots[t]
+	if s == nil || s.latch == nil {
+		return 0
+	}
+	return s.latch.waiters
+}
+
+// TeardownsQueued is how many Teardown calls wait for the first one.
+func TeardownsQueued(c *Container) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.tdQueued
+}
+
+// SetAfterWakeHook installs f to run in every waiter after its wait ends and
+// before it relocks. Install it before the waits it should see begin.
+func SetAfterWakeHook(c *Container, f func(t Token)) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.afterWake = f
+}
+
+// DrainerExited is closed when the observer's drainer goroutine exits.
+func DrainerExited(c *Container) <-chan struct{} { return c.obs.exited }

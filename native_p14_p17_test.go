@@ -40,6 +40,13 @@ func TestP14ObserverPanicIsRecoveredCountedAndDisables(t *testing.T) {
 	if v := mustResolve(t, c, w); v != "t.W" {
 		t.Fatalf("resolve after an observer panic = %v", v)
 	}
+	// Open and cached: an enabled observer would get a cache hit here.
+	if _, err := o.r.Resolve(bg(), w.Token()); !errors.Is(err, typewirego.ErrObserverResolve) {
+		t.Fatalf("disabled observer's Resolve = %v, want refused", err)
+	}
+	if _, err := o.r.GetCached(w.Token()); !errors.Is(err, typewirego.ErrObserverResolve) {
+		t.Fatalf("disabled observer's GetCached = %v, want refused", err)
+	}
 	if err := c.Teardown(bg()); err != nil {
 		t.Fatalf("teardown = %v", err)
 	}
@@ -49,28 +56,36 @@ func TestP14ObserverPanicIsRecoveredCountedAndDisables(t *testing.T) {
 	if o.flushed.Load() != 0 {
 		t.Fatal("a disabled observer was flushed")
 	}
-	if _, err := o.r.Resolve(bg(), w.Token()); !errors.Is(err, typewirego.ErrObserverResolve) {
-		t.Fatalf("disabled observer's resolve = %v", err)
-	}
 }
 
 func TestP14ObserverErrorNeverAltersResolveOrTeardown(t *testing.T) {
 	log := &orderLog{}
 	w := resWire("t.W", log)
+	fresh := leafWire("t.Fresh")
 	c, o := observed(func(o *recObserver) {
 		o.flush = func(context.Context) error { return errors.New("flush failed") }
 	})
-	apply(t, c, w)
-	mustResolve(t, c, w)
+	apply(t, c, w, fresh)
+	first := mustResolve(t, c, w)
 	// Observer resolve errors are the observer's, not the caller's.
 	if _, err := o.r.Resolve(bg(), leafWire("t.Unbound").Token()); err == nil {
 		t.Fatal("unbound observer resolve succeeded")
+	}
+	if _, err := o.r.Resolve(bg(), typewirego.Of(typewirego.Opts[int]{Token: "t.Tr", Scope: typewirego.Transient,
+		Creator: func(context.Context) (int, error) { return 0, nil }}).Token()); err == nil {
+		t.Fatal("observer resolve of an unbound transient succeeded")
+	}
+	if v, err := c.Resolve(bg(), w.Token()); err != nil || v != first {
+		t.Fatalf("app resolve after observer errors = %v, %v", v, err)
+	}
+	if v, err := c.Resolve(bg(), fresh.Token()); err != nil || v != "t.Fresh" {
+		t.Fatalf("fresh app resolve after observer errors = %v, %v", v, err)
 	}
 	if err := c.Teardown(bg()); err != nil {
 		t.Fatalf("teardown = %v, want nil despite observer failures", err)
 	}
 	s := c.Stats()
-	if s.FlushErrors != 1 || s.ObserverResolveErrors != 1 {
+	if s.FlushErrors != 1 || s.ObserverResolveErrors != 2 {
 		t.Fatalf("stats = %+v", s)
 	}
 	if log.count("t.W") != 1 {
@@ -86,8 +101,8 @@ func TestP14FactoryResolvingDuringNewContainerIsRecorded(t *testing.T) {
 		return &recObserver{}
 	}))
 	defer c.Teardown(bg())
-	if !errors.Is(factoryErr, typewirego.ErrObserverResolve) {
-		t.Fatalf("factory resolve = %v, want ErrObserverResolve", factoryErr)
+	if !errors.Is(factoryErr, typewirego.ErrObserverResolve) || errors.Is(factoryErr, typewirego.ErrNotResolved) {
+		t.Fatalf("factory resolve = %v, want the NewContainer refusal (not a cache miss)", factoryErr)
 	}
 	if c.Stats().ObserverResolveErrors != 1 {
 		t.Fatalf("ObserverResolveErrors = %d", c.Stats().ObserverResolveErrors)
@@ -105,14 +120,14 @@ func TestP15ObserverPullsSinkInsideFirstOnEvent(t *testing.T) {
 	ready := make(chan struct{})
 	var first sync.Once
 	var pullErr error
-	var pullSeq uint64
+	deliveredAtPull := -1
 	pulled := make(chan struct{})
 	c, o := observedWith(func(o *recObserver) {
 		o.onEvent = func(e typewirego.Event) {
 			first.Do(func() {
 				<-ready
 				_, pullErr = o.r.Resolve(bg(), sink.Token())
-				pullSeq = e.Seq
+				deliveredAtPull = len(o.got())
 				close(pulled)
 			})
 		}
@@ -130,38 +145,51 @@ func TestP15ObserverPullsSinkInsideFirstOnEvent(t *testing.T) {
 	if o.overlap.Load() {
 		t.Fatal("OnEvent was re-entered")
 	}
-	start := o.find(typewirego.EventResolveStart, "t.Sink")
-	if start == nil || start.Seq <= pullSeq {
-		t.Fatalf("the pull's own events must be delivered after the OnEvent that caused them: %+v", start)
+	idx := -1
+	for i, e := range o.got() {
+		if e.Kind == typewirego.EventResolveStart && e.Label == "t.Sink" {
+			idx = i
+			break
+		}
 	}
-	if !slices.Contains(o.kinds(), typewirego.EventResolveOK) {
-		t.Fatal("no resolve-ok delivered")
+	if deliveredAtPull != 1 || idx < deliveredAtPull {
+		t.Fatalf("the pull's events (index %d) must be delivered after the OnEvent that caused them (%d delivered then)", idx, deliveredAtPull)
 	}
 }
 
 func TestP15EventsDeliveredInSequenceNeverReentrant(t *testing.T) {
-	c, o := observed(func(o *recObserver) {
-		o.onEvent = func(e typewirego.Event) {
-			if e.Kind == typewirego.EventResolveOK {
-				// Resolving from inside OnEvent queues events; it must not
-				// call OnEvent again before this one returns.
-				_, _ = o.r.GetCached(typewirego.Token{})
-			}
+	lazy := leafWire("t.Lazy")
+	var once sync.Once
+	var pullErr error
+	c, o := observed(nil)
+	o.mu.Lock()
+	o.onEvent = func(e typewirego.Event) {
+		if e.Kind == typewirego.EventResolveOK && e.Label != "t.Lazy" {
+			// Creating a value from inside OnEvent queues its events; they
+			// must not be delivered before this OnEvent returns.
+			once.Do(func() { _, pullErr = o.r.Resolve(bg(), lazy.Token()) })
 		}
-	})
+	}
+	o.mu.Unlock()
 	var ws []typewirego.AnyWire
 	for i := range 20 {
 		ws = append(ws, leafWire(fmt.Sprintf("t.W%d", i)))
 	}
-	apply(t, c, ws...)
+	apply(t, c, append(ws, lazy)...)
 	for _, w := range ws {
 		mustResolve(t, c, w)
 	}
 	if err := c.Teardown(bg()); err != nil {
 		t.Fatal(err)
 	}
+	if pullErr != nil {
+		t.Fatalf("pull from OnEvent = %v", pullErr)
+	}
 	if o.overlap.Load() {
 		t.Fatal("OnEvent ran concurrently or re-entrantly")
+	}
+	if o.find(typewirego.EventResolveOK, "t.Lazy") == nil {
+		t.Fatal("the events the pull caused were never delivered")
 	}
 	events := o.got()
 	for i := 1; i < len(events); i++ {
@@ -185,15 +213,20 @@ func TestP15FullQueueDropsAndCountsWithoutBlocking(t *testing.T) {
 	apply(t, c, tr)
 	// Each transient resolve emits two events, so this overfills the queue
 	// while the drainer is stuck in its first OnEvent. None of it may block.
-	for range typewirego.EventQueueCap {
-		mustResolve(t, c, tr)
-	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range typewirego.EventQueueCap {
+			if _, err := c.Resolve(bg(), tr.Token()); err != nil {
+				t.Error(err)
+			}
+		}
+	}()
+	waitClosed(t, done, "resolves while the observer is stuck")
 	if c.Stats().QueueDrops == 0 {
 		t.Fatal("a full queue dropped nothing")
 	}
 	close(release)
-	// One registered event plus two per resolve: wait for the backlog to be
-	// delivered, so closed itself finds room in the queue.
 	const emitted = 1 + 2*typewirego.EventQueueCap
 	eventually(t, "the backlog to drain", func() bool {
 		return uint64(len(o.got()))+c.Stats().QueueDrops == emitted
@@ -206,7 +239,6 @@ func TestP15FullQueueDropsAndCountsWithoutBlocking(t *testing.T) {
 	if last.Kind != typewirego.EventClosed {
 		t.Fatalf("last delivered = %s", last.Kind)
 	}
-	// Seq numbers dropped events too, so the gaps count the drops.
 	if gaps := last.Seq - uint64(len(events)); gaps != c.Stats().QueueDrops {
 		t.Fatalf("sequence gaps = %d, QueueDrops = %d", gaps, c.Stats().QueueDrops)
 	}
@@ -225,8 +257,9 @@ func TestP15ResolveOkPrecedesEventsUsingCachedValue(t *testing.T) {
 		}})
 	c, o := observed(nil)
 	apply(t, c, user)
+	const n = 4
 	var wg sync.WaitGroup
-	for range 4 {
+	for range n {
 		wg.Go(func() {
 			// Each waiter wakes on the latch, then uses the cached value.
 			if _, err := c.Resolve(bg(), s.Token()); err != nil {
@@ -238,6 +271,7 @@ func TestP15ResolveOkPrecedesEventsUsingCachedValue(t *testing.T) {
 		})
 	}
 	waitClosed(t, g.started, "creator")
+	eventually(t, "every waiter on the latch", func() bool { return typewirego.LatchWaiters(c, s.Token()) == n })
 	g.open()
 	wg.Wait()
 	if err := c.Teardown(bg()); err != nil {
@@ -247,10 +281,17 @@ func TestP15ResolveOkPrecedesEventsUsingCachedValue(t *testing.T) {
 	if ok == nil {
 		t.Fatal("no resolve-ok for t.S")
 	}
+	users := 0
 	for _, e := range o.got() {
-		if e.Label == "t.User" && e.Kind != typewirego.EventRegistered && e.Seq < ok.Seq {
-			t.Fatalf("%s for t.User (seq %d) precedes t.S resolve-ok (seq %d)", e.Kind, e.Seq, ok.Seq)
+		if e.Label == "t.User" && e.Kind != typewirego.EventRegistered {
+			users++
+			if e.Seq < ok.Seq {
+				t.Fatalf("%s for t.User (seq %d) precedes t.S resolve-ok (seq %d)", e.Kind, e.Seq, ok.Seq)
+			}
 		}
+	}
+	if users != 2*n {
+		t.Fatalf("%d t.User events, want %d", users, 2*n)
 	}
 }
 
@@ -279,18 +320,31 @@ func TestP15ClosingPrecedesCleanupAndClosedIsLast(t *testing.T) {
 }
 
 func TestP15OnEventNeverOverlapsFlush(t *testing.T) {
+	release := make(chan struct{})
 	var delivered atomic.Int32
 	var flushSaw int32
 	c, o := observed(func(o *recObserver) {
-		o.onEvent = func(typewirego.Event) { delivered.Add(1) }
+		o.onEvent = func(e typewirego.Event) {
+			delivered.Add(1)
+			if e.Kind == typewirego.EventClosing {
+				<-release // a backlog builds up behind this event
+			}
+		}
 		o.flush = func(context.Context) error {
 			flushSaw = delivered.Load()
 			return nil
 		}
 	})
-	for i := range 50 {
-		w := leafWire(fmt.Sprintf("t.W%d", i))
-		apply(t, c, w)
+	releaser := typewirego.Of(typewirego.Opts[*hookCloser]{Token: "t.Releaser", Creator: func(context.Context) (*hookCloser, error) {
+		return &hookCloser{close: func() error { close(release); return nil }}, nil
+	}})
+	var ws []typewirego.AnyWire
+	for i := range 20 {
+		ws = append(ws, resWire(fmt.Sprintf("t.W%d", i), &orderLog{}))
+	}
+	apply(t, c, append(ws, releaser)...)
+	mustResolve(t, c, releaser)
+	for _, w := range ws {
 		mustResolve(t, c, w)
 	}
 	if err := c.Teardown(bg()); err != nil {
@@ -299,8 +353,8 @@ func TestP15OnEventNeverOverlapsFlush(t *testing.T) {
 	if o.overlap.Load() {
 		t.Fatal("Flush overlapped OnEvent")
 	}
-	if flushSaw != int32(len(o.got())) {
-		t.Fatalf("Flush ran after %d of %d events", flushSaw, len(o.got()))
+	if n := int32(len(o.got())); flushSaw != n || o.find(typewirego.EventClosed, "") == nil {
+		t.Fatalf("Flush ran after %d of %d events; the backlog, closed included, must be delivered first", flushSaw, n)
 	}
 }
 
@@ -352,8 +406,9 @@ func TestP15EventOrderUnderConcurrentResolves(t *testing.T) {
 }
 
 func TestP16ObserverResolverRejectsTransients(t *testing.T) {
+	var calls atomic.Int32
 	tr := typewirego.Of(typewirego.Opts[int]{Token: "t.T", Scope: typewirego.Transient,
-		Creator: func(context.Context) (int, error) { return 1, nil }})
+		Creator: func(context.Context) (int, error) { calls.Add(1); return 1, nil }})
 	app := leafWire("t.App")
 	c, o := observed(nil)
 	defer c.Teardown(bg())
@@ -364,6 +419,9 @@ func TestP16ObserverResolverRejectsTransients(t *testing.T) {
 	}
 	if _, err := o.r.GetCached(tr.Token()); !errors.Is(err, typewirego.ErrObserverResolve) {
 		t.Fatalf("observer GetCached of a transient = %v", err)
+	}
+	if calls.Load() != 0 {
+		t.Fatal("the observer ran a transient creator")
 	}
 }
 

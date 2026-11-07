@@ -304,12 +304,17 @@ func (c *Container) observerResolve(ctx context.Context, t Token, cacheOnly bool
 		cr = c.startSingletonLocked(s, nil)
 	}
 	o.waiting[t]++
+	cr.waiters++
 	c.mu.Unlock()
 	select {
 	case <-cr.done:
 	case <-ctx.Done():
 	}
+	if c.afterWake != nil {
+		c.afterWake(t)
+	}
 	c.mu.Lock()
+	cr.waiters--
 	if o.waiting[t]--; o.waiting[t] <= 0 {
 		delete(o.waiting, t)
 	}

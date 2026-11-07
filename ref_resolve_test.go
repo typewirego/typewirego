@@ -209,19 +209,27 @@ func TestWaitBegunByAnEndedCreatorsGoroutineIsNoCycle(t *testing.T) {
 			_, err := r.Resolve(ctx, x.Token())
 			return "y", err
 		}})
+	xReturned := make(chan struct{})
 	later := make(chan error, 1)
 	x = typewirego.Of(typewirego.Opts[string]{Token: "t.X",
 		CreateWith: func(ctx context.Context, _ typewirego.Deps, r typewirego.Resolver) (string, error) {
-			// A goroutine X started keeps X's resolver and waits on Y after X
-			// has returned: X waits on nothing, so Y resolving X is no cycle.
-			go func() { _, err := r.Resolve(bg(), y.Token()); later <- err }()
+			// A goroutine X started keeps X's resolver and waits on Y only
+			// after X has returned: X waits on nothing, so Y resolving X is
+			// no cycle.
+			go func() {
+				<-xReturned
+				_, err := r.Resolve(bg(), y.Token())
+				later <- err
+			}()
 			return "x", nil
 		}})
 	c := typewirego.NewContainer(bg())
 	defer c.Teardown(bg())
 	apply(t, c, x, y)
 	mustResolve(t, c, x)
+	close(xReturned)
 	waitClosed(t, yGate.started, "y")
+	eventually(t, "the late wait on y", func() bool { return typewirego.LatchWaiters(c, y.Token()) == 1 })
 	yGate.open()
 	if err := recv(t, later, "the late wait"); err != nil {
 		t.Fatalf("wait from an ended creator's goroutine = %v", err)
@@ -390,14 +398,24 @@ func TestFlushBudgetArithmetic(t *testing.T) {
 			t.Errorf("FlushBudgetFor(%v) = %v, want %v", tc.configured, got, tc.want)
 		}
 	}
-	// A negative configured budget is zero.
-	var left time.Duration = -1
-	c, _ := observed(func(o *recObserver) {
-		o.flush = func(ctx context.Context) error { dl, _ := ctx.Deadline(); left = time.Until(dl); return nil }
+	// A negative configured budget is zero: Flush runs with an allowance
+	// that is already over.
+	left := time.Hour
+	hasDeadline := false
+	c, o := observed(func(o *recObserver) {
+		o.flush = func(ctx context.Context) error {
+			var dl time.Time
+			dl, hasDeadline = ctx.Deadline()
+			left = time.Until(dl)
+			return nil
+		}
 	}, typewirego.WithFlushBudget(-time.Hour))
 	_ = c.Teardown(bg())
-	if left > 0 {
-		t.Fatalf("negative budget left %v for Flush", left)
+	if o.flushed.Load() != 1 || c.Stats().FlushErrors != 0 || !hasDeadline {
+		t.Fatalf("flushed %d, FlushErrors %d, deadline %v", o.flushed.Load(), c.Stats().FlushErrors, hasDeadline)
+	}
+	if left > 0 || left < -typewirego.CleanupGrace-time.Second {
+		t.Fatalf("negative budget left %v for Flush, want a zero allowance", left)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -297,6 +298,7 @@ func TestTeardownRunsTheClosersItRecognizesOnTheValue(t *testing.T) {
 func TestLifetimeEndsAfterItsOwnCleanup(t *testing.T) {
 	var lifeB, lifeFailed context.Context
 	var bEndedAtA error = errors.New("unset")
+	var bLiveAtC error = errors.New("unset")
 	a := typewirego.Of(typewirego.Opts[*hookCloser]{Token: "t.A", Creator: func(context.Context) (*hookCloser, error) {
 		return &hookCloser{close: func() error { bEndedAtA = lifeB.Err(); return nil }}, nil
 	}})
@@ -306,15 +308,20 @@ func TestLifetimeEndsAfterItsOwnCleanup(t *testing.T) {
 			lifeB = typewirego.Lifetime(d)
 			return 1, nil
 		}})
+	// C is created after B, so it is cleaned before B's slot.
+	cw := typewirego.Of(typewirego.Opts[*hookCloser]{Token: "t.C", Creator: func(context.Context) (*hookCloser, error) {
+		return &hookCloser{close: func() error { bLiveAtC = lifeB.Err(); return nil }}, nil
+	}})
 	failing := typewirego.Of(typewirego.Opts[int]{Token: "t.F",
 		CreateWith: func(_ context.Context, d typewirego.Deps, _ typewirego.Resolver) (int, error) {
 			lifeFailed = typewirego.Lifetime(d)
 			return 0, errors.New("no")
 		}})
 	c := typewirego.NewContainer(bg())
-	apply(t, c, a, b, failing)
+	apply(t, c, a, b, cw, failing)
 	mustResolve(t, c, a)
 	mustResolve(t, c, b)
+	mustResolve(t, c, cw)
 	_, _ = c.Resolve(bg(), failing.Token())
 	if lifeFailed.Err() == nil {
 		t.Fatal("a failed creation's Lifetime did not end at once")
@@ -325,36 +332,42 @@ func TestLifetimeEndsAfterItsOwnCleanup(t *testing.T) {
 	if err := c.Teardown(bg()); err != nil {
 		t.Fatal(err)
 	}
+	if bLiveAtC != nil {
+		t.Fatalf("B's Lifetime ended before B's slot (at C's cleanup it was %v)", bLiveAtC)
+	}
 	if !errors.Is(bEndedAtA, context.Canceled) {
 		t.Fatalf("at A's cleanup B's Lifetime was %v, want ended after B's own slot", bEndedAtA)
 	}
 }
 
 func TestTransientLifetimeEndsAfterTeardown(t *testing.T) {
-	var life context.Context
+	var lives []context.Context
 	var atCleanup error = errors.New("unset")
 	tr := typewirego.Of(typewirego.Opts[int]{Token: "t.T", Scope: typewirego.Transient,
 		CreateWith: func(_ context.Context, d typewirego.Deps, _ typewirego.Resolver) (int, error) {
-			life = typewirego.Lifetime(d)
+			lives = append(lives, typewirego.Lifetime(d))
 			return 1, nil
 		}})
 	s := typewirego.Of(typewirego.Opts[*hookCloser]{Token: "t.S", Creator: func(context.Context) (*hookCloser, error) {
-		return &hookCloser{close: func() error { atCleanup = life.Err(); return nil }}, nil
+		return &hookCloser{close: func() error { atCleanup = lives[0].Err(); return nil }}, nil
 	}})
 	c := typewirego.NewContainer(bg())
 	apply(t, c, tr, s)
 	mustResolve(t, c, tr)
+	mustResolve(t, c, tr)
 	mustResolve(t, c, s)
+	if lives[0] != lives[1] {
+		t.Fatal("two transients got different Lifetimes; they share the container's")
+	}
 	if err := c.Teardown(bg()); err != nil {
 		t.Fatal(err)
 	}
 	if atCleanup != nil {
 		t.Fatal("the transient Lifetime ended during the cleanup pass")
 	}
-	if err := c.Wait(ctxWithTimeout(t)); err != nil {
-		t.Fatal(err)
-	}
-	if life.Err() == nil {
+	// Teardown finished every cleanup itself, so the container's Lifetime has
+	// ended by the time it returns.
+	if lives[0].Err() == nil {
 		t.Fatal("the transient Lifetime outlived every cleanup")
 	}
 }
@@ -392,16 +405,18 @@ func TestTeardownStopsWaitingForABlockedCloserAtItsDeadline(t *testing.T) {
 	apply(t, c, first, bw)
 	mustResolve(t, c, first)
 	mustResolve(t, c, bw)
-	ctx, cancel := context.WithTimeout(bg(), 20*time.Millisecond)
+	const bound = 20 * time.Millisecond
+	ctx, cancel := context.WithTimeout(bg(), bound)
 	defer cancel()
 	start := time.Now()
 	tt := timeoutErr(t, c.Teardown(ctx))
-	if el := time.Since(start); el > time.Second {
-		t.Fatalf("Teardown took %v", el)
+	// The pass waits one grace past its bound, then goes on.
+	if el := time.Since(start); el > bound+typewirego.CleanupGrace+400*time.Millisecond {
+		t.Fatalf("Teardown took %v, want about %v", el, bound+typewirego.CleanupGrace)
 	}
 	// t.First is due to start after the deadline, so it too is started and
 	// left to finish on its own.
-	if len(tt.Cleanups) == 0 || tt.Cleanups[0] != "t.Blocked" || !slices.Equal(tt.HeldBack, []string{"t.Dep"}) {
+	if !slices.Equal(tt.Cleanups, []string{"t.Blocked", "t.First"}) || !slices.Equal(tt.HeldBack, []string{"t.Dep"}) {
 		t.Fatalf("Cleanups %v HeldBack %v", tt.Cleanups, tt.HeldBack)
 	}
 	if log.count("t.Dep") != 0 || log.count("t.Blocked") != 0 {
@@ -470,7 +485,7 @@ func TestBlockedCloserHoldsBackItsImportInTheObserverSet(t *testing.T) {
 
 // releasingCloser is a main-pass value whose cleanup opens g and returns once
 // the late creation has finished, so Teardown is the last participant.
-func releasingCloser(g *gate, finished func() bool) typewirego.TypeWire[*hookCloser] {
+func releasingCloser(g *gate, finished func() bool, saw *atomic.Bool) typewirego.TypeWire[*hookCloser] {
 	return typewirego.Of(typewirego.Opts[*hookCloser]{Token: "t.Releaser", Creator: func(context.Context) (*hookCloser, error) {
 		return &hookCloser{close: func() error {
 			g.open()
@@ -478,6 +493,7 @@ func releasingCloser(g *gate, finished func() bool) typewirego.TypeWire[*hookClo
 			for !finished() && time.Now().Before(deadline) {
 				time.Sleep(100 * time.Microsecond) // observes, never orders
 			}
+			saw.Store(finished())
 			return nil
 		}}, nil
 	}})
@@ -488,13 +504,17 @@ func TestTeardownMainPassFinishingLastCleansHeldBackImports(t *testing.T) {
 	s := resWire("t.S", log)
 	g := newGate()
 	late := gated("t.Late", typewirego.Singleton, g, newRes("t.Late", log), false, s)
-	releaser := releasingCloser(g, func() bool { return log.count("t.Late") == 1 })
+	var sawFinish atomic.Bool
+	releaser := releasingCloser(g, func() bool { return log.count("t.Late") == 1 }, &sawFinish)
 	c := typewirego.NewContainer(bg())
 	apply(t, c, releaser, late)
 	mustResolve(t, c, s)
 	mustResolve(t, c, releaser)
 	startLate(t, c, late, g)
 	tt := timeoutErr(t, c.Teardown(expiredCtx()))
+	if !sawFinish.Load() {
+		t.Fatal("the late creation did not finish during the main pass, so Teardown was not last")
+	}
 	if !slices.Equal(tt.HeldBack, []string{"t.S"}) {
 		t.Fatalf("HeldBack = %v", tt.HeldBack)
 	}
@@ -525,13 +545,17 @@ func TestHeldBackCleanupAfterTeardownFinishesLastIgnoresTheTeardownContext(t *te
 			g.enter()
 			return &hookCloser{close: func() error { lateDone.Store(true); return nil }}, nil
 		}})
-	releaser := releasingCloser(g, lateDone.Load)
+	var sawFinish atomic.Bool
+	releaser := releasingCloser(g, lateDone.Load, &sawFinish)
 	c := typewirego.NewContainer(bg())
 	apply(t, c, releaser, late)
 	mustResolve(t, c, s)
 	mustResolve(t, c, releaser)
 	startLate(t, c, late, g)
 	timeoutErr(t, c.Teardown(expiredCtx()))
+	if !sawFinish.Load() {
+		t.Fatal("the late creation did not finish during the main pass, so Teardown was not last")
+	}
 	waitClosed(t, cleaned, "held-back cleanup")
 	if sawErr != nil {
 		t.Fatalf("held-back cleanup saw %v, want a context Teardown's cancellation never reaches", sawErr)
@@ -749,21 +773,38 @@ func TestHeldBackCountsAValueARunningCreatorIsWaking(t *testing.T) {
 		}})
 	c := typewirego.NewContainer(bg())
 	apply(t, c, x, w)
+	// Hold X's waiter between W's latch opening and X taking the lock again.
+	woke := make(chan struct{})
+	resume := make(chan struct{})
+	var once sync.Once
+	typewirego.SetAfterWakeHook(c, func(tok typewirego.Token) {
+		if tok == w.Token() {
+			once.Do(func() { close(woke); <-resume })
+		}
+	})
 	go c.Resolve(bg(), x.Token())
 	waitClosed(t, wg.started, "w")
-	// W finishes and is cached; X may or may not have woken yet.
+	eventually(t, "x on w's latch", func() bool { return typewirego.LatchWaiters(c, w.Token()) == 1 })
 	wg.open()
-	eventually(t, "w cached", func() bool { _, err := c.GetCached(w.Token()); return err == nil })
+	waitClosed(t, woke, "x's waiter to wake")
+	if _, err := c.GetCached(w.Token()); err != nil {
+		t.Fatalf("w not cached: %v", err)
+	}
+	// Teardown snapshots while X has not yet seen W's value.
 	tt := timeoutErr(t, c.Teardown(expiredCtx()))
 	if !slices.Equal(tt.HeldBack, []string{"t.W"}) {
-		t.Fatalf("HeldBack = %v", tt.HeldBack)
+		t.Fatalf("HeldBack = %v, want the value the running creator is waking on", tt.HeldBack)
 	}
 	if log.count("t.W") != 0 {
 		t.Fatal("a value a running creator waits on was cleaned in the main pass")
 	}
+	close(resume)
 	xg.open()
 	if err := c.Wait(ctxWithTimeout(t)); err != nil {
 		t.Fatal(err)
+	}
+	if log.count("t.W") != 1 {
+		t.Fatal("not cleaned once")
 	}
 }
 
@@ -847,15 +888,20 @@ func TestLateCreationClosesNothingAClosingTransientOwns(t *testing.T) {
 	end, result := closingTeardown(c)
 	eventually(t, "closing", func() bool { return closingNow(c, tr) })
 	tg.open()
-	recv(t, terr, "transient caller")
+	if err := recv(t, terr, "transient caller"); !errors.Is(err, typewirego.ErrClosing) {
+		t.Fatalf("transient caller = %v, want ErrClosing", err)
+	}
 	end()
 	timeoutErr(t, recv(t, result, "teardown"))
+	if log.count("shared") != 1 {
+		t.Fatalf("closed %d times by Teardown, want once by the closing transient", log.count("shared"))
+	}
 	lg.open()
 	if err := c.Wait(ctxWithTimeout(t)); err != nil {
 		t.Fatal(err)
 	}
 	if log.count("shared") != 1 {
-		t.Fatalf("closed %d times, want once by the closing transient", log.count("shared"))
+		t.Fatalf("closed %d times, want once: the late creation closes nothing", log.count("shared"))
 	}
 }
 
@@ -911,23 +957,28 @@ func TestLatePassThroughLeavesSharedValueToHeldBackPass(t *testing.T) {
 			g.enter()
 			return typewirego.Dep(d, inner)
 		}})
-	other := resWire("t.Other", log)
-	c, o := observed(nil)
+	yg := newGate()
+	other := gated("t.Other", typewirego.Singleton, yg, newRes("t.Other", log), false, inner)
+	c := typewirego.NewContainer(bg())
 	apply(t, c, pass, other)
-	startLate(t, c, pass, g)
-	mustResolve(t, c, other)
+	perr := startLate(t, c, pass, g)
+	startLate(t, c, other, yg)
 	tt := timeoutErr(t, c.Teardown(expiredCtx()))
 	if !slices.Equal(tt.HeldBack, []string{"t.Inner"}) {
 		t.Fatalf("HeldBack = %v", tt.HeldBack)
 	}
 	g.open()
+	recv(t, perr, "pass-through caller")
+	if log.count("t.Inner") != 0 {
+		t.Fatal("the late pass-through closed the shared value while another importer still runs")
+	}
+	yg.open()
 	if err := c.Wait(ctxWithTimeout(t)); err != nil {
 		t.Fatal(err)
 	}
 	if got := log.get(); !slices.Equal(got, []string{"t.Other", "t.Inner"}) {
-		t.Fatalf("closes = %v", got)
+		t.Fatalf("closes = %v, want the shared value once, in the held-back pass", got)
 	}
-	_ = o
 }
 
 func TestClosingTransientDoesNotDemoteOrDoubleCloseAnOwnedValue(t *testing.T) {
@@ -937,7 +988,7 @@ func TestClosingTransientDoesNotDemoteOrDoubleCloseAnOwnedValue(t *testing.T) {
 	kg, ug := newGate(), newGate()
 	keep := gated("t.Keep", typewirego.Transient, kg, v, true)
 	plain := gated("t.Plain", typewirego.Transient, ug, v, false)
-	c := typewirego.NewContainer(bg())
+	c, o := observed(nil)
 	apply(t, c, owner, keep, plain)
 	mustResolve(t, c, owner)
 	kerr := startLate(t, c, keep, kg)
@@ -945,15 +996,24 @@ func TestClosingTransientDoesNotDemoteOrDoubleCloseAnOwnedValue(t *testing.T) {
 	tdDone := make(chan error, 1)
 	go func() { tdDone <- c.Teardown(bg()) }()
 	eventually(t, "closing", func() bool { return closingNow(c, owner) })
+	// The KeepOpen transient finishes first, then the plain one.
 	kg.open()
-	ug.open()
 	recv(t, kerr, "keep caller")
+	ug.open()
 	recv(t, perr, "plain caller")
 	if err := recv(t, tdDone, "teardown"); err != nil {
 		t.Fatal(err)
 	}
 	if log.count("shared") != 1 {
 		t.Fatalf("closed %d times, want once by its owner", log.count("shared"))
+	}
+	for _, e := range o.got() {
+		if e.Kind == typewirego.EventCleanupStart && e.Label != "t.Owner" {
+			t.Fatalf("cleanup ran for %s; only the owner closes the value", e.Label)
+		}
+	}
+	if o.find(typewirego.EventCleanupStart, "t.Owner") == nil {
+		t.Fatal("the owner did not close its value")
 	}
 }
 

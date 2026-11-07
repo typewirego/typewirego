@@ -61,6 +61,7 @@ type Container struct {
 	inFlight     map[*inst]bool
 
 	tdStarted    bool
+	tdQueued     int // Teardown calls waiting for the first
 	tdDone       chan struct{}
 	fixed        bool
 	heldBack     map[*inst]bool
@@ -76,6 +77,10 @@ type Container struct {
 	seq         uint64
 
 	stats statsCounters
+
+	// afterWake is a test hook run by a waiter after its wait ends and
+	// before it takes the lock again.
+	afterWake func(t Token)
 }
 
 type statsCounters struct {
@@ -208,6 +213,8 @@ type inst struct {
 
 	imports map[Token]bool
 	waits   map[*inst]int
+	// waiters counts the resolves currently waiting on this creation.
+	waiters int
 
 	closer    closerKind
 	owns      bool

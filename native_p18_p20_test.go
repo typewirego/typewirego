@@ -34,15 +34,32 @@ func TestP18CreatorAbortContextCancelledAtClosing(t *testing.T) {
 		abort = ctx
 		return &hookCloser{close: func() error { errAtCleanup = ctx.Err(); return nil }}, nil
 	}})
+	// A creation still running when Teardown begins: it ends only when its
+	// abort context is cancelled.
+	started := make(chan struct{})
+	unblocked := make(chan struct{})
+	blocked := typewirego.Of(typewirego.Opts[int]{Token: "t.Blocked", Creator: func(ctx context.Context) (int, error) {
+		close(started)
+		<-ctx.Done()
+		close(unblocked)
+		return 0, ctx.Err()
+	}})
 	c := typewirego.NewContainer(bg())
-	apply(t, c, w)
+	apply(t, c, w, blocked)
 	mustResolve(t, c, w)
 	if abort.Err() != nil {
 		t.Fatal("abort context ended before Teardown")
 	}
-	if err := c.Teardown(bg()); err != nil {
-		t.Fatal(err)
+	go c.Resolve(bg(), blocked.Token())
+	waitClosed(t, started, "blocked creator")
+	// A bound Teardown can only finish its wait in time if Closing itself
+	// cancels the in-flight creator.
+	ctx, cancel := context.WithTimeout(bg(), testTimeout)
+	defer cancel()
+	if err := c.Teardown(ctx); err != nil {
+		t.Fatalf("teardown = %v, want nil: the abort context must be cancelled when Closing begins", err)
 	}
+	waitClosed(t, unblocked, "the creator's abort context")
 	if !errors.Is(errAtCleanup, context.Canceled) {
 		t.Fatalf("at cleanup the abort context was %v, want cancelled since Closing", errAtCleanup)
 	}
@@ -56,6 +73,11 @@ func (h *hookCloser) Close() error { return h.close() }
 func TestP18LifetimeContextEndsAfterOwnCleanup(t *testing.T) {
 	var life context.Context
 	var atOwnCleanup, atLaterCleanup error
+	afterOwn := errors.New("unset")
+	// Z is created first, so its cleanup runs after A's.
+	z := typewirego.Of(typewirego.Opts[*hookCloser]{Token: "t.Z", Creator: func(context.Context) (*hookCloser, error) {
+		return &hookCloser{close: func() error { afterOwn = life.Err(); return nil }}, nil
+	}})
 	a := typewirego.Of(typewirego.Opts[*hookCloser]{Token: "t.A",
 		CreateWith: func(_ context.Context, d typewirego.Deps, _ typewirego.Resolver) (*hookCloser, error) {
 			life = typewirego.Lifetime(d)
@@ -65,7 +87,8 @@ func TestP18LifetimeContextEndsAfterOwnCleanup(t *testing.T) {
 		return &hookCloser{close: func() error { atLaterCleanup = life.Err(); return nil }}, nil
 	}})
 	c := typewirego.NewContainer(bg())
-	apply(t, c, a, b)
+	apply(t, c, z, a, b)
+	mustResolve(t, c, z)
 	mustResolve(t, c, a)
 	mustResolve(t, c, b)
 	if err := c.Teardown(bg()); err != nil {
@@ -74,9 +97,10 @@ func TestP18LifetimeContextEndsAfterOwnCleanup(t *testing.T) {
 	if atLaterCleanup != nil || atOwnCleanup != nil {
 		t.Fatalf("Lifetime ended before its own cleanup ran: %v, %v", atLaterCleanup, atOwnCleanup)
 	}
-	if life.Err() == nil {
-		t.Fatal("Lifetime did not end after its own cleanup")
+	if !errors.Is(afterOwn, context.Canceled) {
+		t.Fatalf("at the next slot A's Lifetime was %v, want ended right after A's own cleanup", afterOwn)
 	}
+	// Pinned value: Lifetime of a zero Deps is context.Background().
 	if typewirego.Lifetime(typewirego.Deps{}) != context.Background() {
 		t.Fatal("Lifetime of zero Deps is not Background")
 	}
@@ -186,27 +210,30 @@ func TestP19HeldBackClosureCleanedOnceByLastFinisher(t *testing.T) {
 	log := &orderLog{}
 	s := resWire("t.S", log)
 	m := resWire("t.M", log, s)
-	g := newGate()
-	x := typewirego.Of(typewirego.Opts[*res]{Token: "t.X",
-		Imports: []typewirego.Import{{Name: "m", Wire: m}},
-		CreateWith: func(context.Context, typewirego.Deps, typewirego.Resolver) (*res, error) {
-			g.enter()
-			return newRes("t.X", log), nil
-		}})
+	g1, g2 := newGate(), newGate()
+	x1 := gatedRes("t.X1", g1, log, m)
+	x2 := gatedRes("t.X2", g2, log, m)
 	c := typewirego.NewContainer(bg())
-	apply(t, c, x)
-	go c.Resolve(bg(), x.Token())
-	waitClosed(t, g.started, "x")
+	apply(t, c, x1, x2)
+	go c.Resolve(bg(), x1.Token())
+	go c.Resolve(bg(), x2.Token())
+	waitClosed(t, g1.started, "x1")
+	waitClosed(t, g2.started, "x2")
 	tt := timeoutErr(t, c.Teardown(expiredCtx()))
 	if !slices.Equal(tt.HeldBack, []string{"t.S", "t.M"}) {
 		t.Fatalf("HeldBack = %v", tt.HeldBack)
 	}
-	g.open()
+	g1.open()
+	eventually(t, "x1 to clean its own value", func() bool { return log.count("t.X1") == 1 })
+	if log.count("t.M") != 0 || log.count("t.S") != 0 {
+		t.Fatalf("held-back values cleaned before the last finisher: %v", log.get())
+	}
+	g2.open()
 	if err := c.Wait(ctxWithTimeout(t)); err != nil {
 		t.Fatal(err)
 	}
-	if got := log.get(); !slices.Equal(got, []string{"t.X", "t.M", "t.S"}) {
-		t.Fatalf("order = %v", got)
+	if got := log.get(); !slices.Equal(got, []string{"t.X1", "t.X2", "t.M", "t.S"}) {
+		t.Fatalf("order = %v, want each once and the closure after the last finisher", got)
 	}
 }
 
@@ -263,8 +290,8 @@ func TestP20FlushBudgetIsQuarterOfRemainingTime(t *testing.T) {
 	if err := c.Teardown(tctx); err != nil {
 		t.Fatal(err)
 	}
-	if left <= 0 || left > 100*time.Millisecond {
-		t.Fatalf("Flush allowance left %v, want at most a quarter of 400ms", left)
+	if left <= 50*time.Millisecond || left > 100*time.Millisecond {
+		t.Fatalf("Flush allowance left %v, want about a quarter of 400ms", left)
 	}
 }
 
@@ -361,4 +388,17 @@ func TestP20ObserverSetCleanupGetsSecondAllowance(t *testing.T) {
 	if c.Stats().FlushErrors != 1 {
 		t.Fatalf("FlushErrors = %d", c.Stats().FlushErrors)
 	}
+}
+
+// gatedRes is a singleton returning a fresh *res once g opens.
+func gatedRes(label string, g *gate, log *orderLog, imports ...typewirego.AnyWire) typewirego.TypeWire[*res] {
+	var imps []typewirego.Import
+	for _, w := range imports {
+		imps = append(imps, typewirego.Import{Name: w.Token().Label(), Wire: w})
+	}
+	return typewirego.Of(typewirego.Opts[*res]{Token: label, Imports: imps,
+		CreateWith: func(context.Context, typewirego.Deps, typewirego.Resolver) (*res, error) {
+			g.enter()
+			return newRes(label, log), nil
+		}})
 }
