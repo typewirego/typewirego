@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/logo.png" alt="TypeWire GO logo" width="160">
+</p>
+
 # typewirego
 
 [![CI](https://github.com/typewirego/typewirego/actions/workflows/ci.yml/badge.svg)](https://github.com/typewirego/typewirego/actions/workflows/ci.yml)
