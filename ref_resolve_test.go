@@ -291,6 +291,51 @@ func TestWaitForCycleThroughATransientFrame(t *testing.T) {
 	}
 }
 
+func TestResolverWaitOutlivingItsCreatorStillGetsTheValue(t *testing.T) {
+	// A's creator hands its Resolver to a goroutine that waits on B's latch,
+	// then returns. When B finishes, that goroutine still gets B's value: the
+	// creator's Resolver stays usable after it returns.
+	bIn, bRelease, aRelease := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	b := typewirego.Of(typewirego.Opts[string]{Token: "t.B", Creator: func(context.Context) (string, error) {
+		close(bIn)
+		<-bRelease
+		return "b", nil
+	}})
+	type result struct {
+		v   string
+		err error
+	}
+	late := make(chan result, 1)
+	a := typewirego.Of(typewirego.Opts[string]{Token: "t.A",
+		CreateWith: func(ctx context.Context, _ typewirego.Deps, r typewirego.Resolver) (string, error) {
+			go func() {
+				v, err := b.GetInstance(bg(), r)
+				late <- result{v, err}
+			}()
+			<-aRelease
+			return "a", nil
+		}})
+	c := typewirego.NewContainer(bg())
+	defer c.Teardown(bg())
+	apply(t, c, a, b)
+	ctx := ctxWithTimeout(t)
+	go c.Resolve(ctx, b.Token())
+	waitClosed(t, bIn, "B's creator")
+	aDone := make(chan error, 1)
+	go func() { _, err := c.Resolve(ctx, a.Token()); aDone <- err }()
+	// B's latch has two waiters once A's goroutine waits: the root resolve of B
+	// and that goroutine.
+	eventually(t, "A's goroutine waiting on B", func() bool { return typewirego.LatchWaiters(c, b.Token()) == 2 })
+	close(aRelease)
+	if err := recv(t, aDone, "A"); err != nil {
+		t.Fatal(err)
+	}
+	close(bRelease)
+	if r := recv(t, late, "the goroutine's resolve of B"); r.err != nil || r.v != "b" {
+		t.Fatalf("got %q, %v; want b", r.v, r.err)
+	}
+}
+
 func TestWithCreatorKeepsKeepOpen(t *testing.T) {
 	log := &orderLog{}
 	borrowed := typewirego.Of(typewirego.Opts[*res]{Token: "t.Borrowed", KeepOpen: true,

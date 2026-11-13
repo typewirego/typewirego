@@ -247,12 +247,15 @@ func (c *Container) awaitLocked(ctx context.Context, chain *frame, cr *inst) (an
 	defer c.mu.Unlock()
 	cr.waiters--
 	if waiter != nil {
-		m := waiter.waits[cr]
-		if m[chain]--; m[chain] <= 0 {
-			delete(m, chain)
-		}
-		if len(m) == 0 {
-			delete(waiter.waits, cr)
+		// The waiter may have finished meanwhile, since a goroutine using its
+		// Resolver can outlive it, and finish cleared its waits.
+		if m := waiter.waits[cr]; m != nil {
+			if m[chain]--; m[chain] <= 0 {
+				delete(m, chain)
+			}
+			if len(m) == 0 {
+				delete(waiter.waits, cr)
+			}
 		}
 	}
 	select {
