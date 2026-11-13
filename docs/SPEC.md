@@ -323,10 +323,12 @@ run under, and waits for in-flight creations, bounded by its context.
 - Go API: `Container.Teardown`, `Container.Wait`, `*TeardownTimeoutError`.
 - A creation finishing during that wait, singleton or transient, is never
   cached or returned: its callers get `ErrClosing` and its value is cleaned in
-  the same pass. Such a transient is kept only for its own cleanup and never
-  claims or demotes an owner: it closes nothing when it is `KeepOpen` or
-  another creation already owns its value, and otherwise closes the value
-  once. If a singleton then finishes with the same value during the same wait,
+  the same pass. Its event is `resolve-failed` with the class its callers get
+  (`closing`, unless the creator's own error matches an earlier class such as
+  `canceled`), never `resolve-ok`; a late creation's is the same. Such a
+  transient is kept only for its own cleanup and never claims or demotes an
+  owner: it closes nothing when it is `KeepOpen` or another creation already
+  owns its value, and otherwise closes the value once. If a singleton then finishes with the same value during the same wait,
   the singleton owns it and closes it at its own slot, takes over the
   transient's token (a *takeover*), so a running creation that imported that
   transient still holds the value back, and the transient closes nothing.
@@ -411,7 +413,9 @@ count drops.
   caused by the observer's own resolve is delivered after the current
   `OnEvent` returns.
 - `resolve-ok` is emitted at the moment the value is cached, so it precedes
-  every event that used the cached value. `closing` precedes every cleanup
+  every event that used the cached value, and only for a value its callers
+  get: a creation that is never cached or returned (P12) emits
+  `resolve-failed`. `closing` precedes every cleanup
   event, and `closed` is the last event delivered.
 
 Pinned by:
@@ -423,7 +427,8 @@ Pinned by:
 - `TestP15ClosingPrecedesCleanupAndClosedIsLast`
 - `TestP15OnEventNeverOverlapsFlush`
 - `TestP15EventOrderUnderConcurrentResolves`
-- also `TestEventsCarryNodeIDsDurationsAndCloser`
+- also `TestEventsCarryNodeIDsDurationsAndCloser`,
+  `TestP19CreationFinishingDuringWaitIsClosingFailure`
 
 ## P16 The observer's Resolver is enforced
 

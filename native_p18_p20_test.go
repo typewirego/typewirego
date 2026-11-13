@@ -238,22 +238,49 @@ func TestP19HeldBackClosureCleanedOnceByLastFinisher(t *testing.T) {
 }
 
 func TestP19CreationFinishingDuringWaitIsClosingFailure(t *testing.T) {
-	// A singleton finishing during the wait: its caller gets ErrClosing, never
-	// the value.
+	// Creations finishing during the wait, singleton or transient, succeeding
+	// or failing: each caller gets ErrClosing, never the value, and the
+	// observer sees resolve-failed with the class the caller got, never
+	// resolve-ok (P12, P15).
 	g := newGate()
+	boom := errors.New("boom")
 	s := typewirego.Of(typewirego.Opts[string]{Token: "t.S", Creator: func(ctx context.Context) (string, error) {
 		g.enter()
 		return "value", nil
 	}})
-	c := typewirego.NewContainer(bg())
-	apply(t, c, s)
+	f := typewirego.Of(typewirego.Opts[string]{Token: "t.F", Creator: func(ctx context.Context) (string, error) {
+		g.enter()
+		return "", boom
+	}})
+	tr := typewirego.Of(typewirego.Opts[string]{Token: "t.T", Scope: typewirego.Transient,
+		Creator: func(ctx context.Context) (string, error) {
+			g.enter()
+			return "value", nil
+		}})
+	c, o := observed(nil)
+	apply(t, c, s, f, tr)
 	type result struct {
-		v   any
-		err error
+		label string
+		v     any
+		err   error
 	}
-	rc := make(chan result, 1)
-	go func() { v, err := c.Resolve(bg(), s.Token()); rc <- result{v, err} }()
-	waitClosed(t, g.started, "creator")
+	rc := make(chan result, 3)
+	for _, w := range []typewirego.AnyWire{s, f, tr} {
+		go func() {
+			v, err := c.Resolve(bg(), w.Token())
+			rc <- result{w.Token().Label(), v, err}
+		}()
+	}
+	waitClosed(t, g.started, "a creator")
+	eventually(t, "every creator to start", func() bool {
+		n := 0
+		for _, e := range o.got() {
+			if e.Kind == typewirego.EventResolveStart {
+				n++
+			}
+		}
+		return n == 3
+	})
 	done := make(chan error, 1)
 	go func() { done <- c.Teardown(bg()) }()
 	eventually(t, "closing", func() bool {
@@ -261,12 +288,26 @@ func TestP19CreationFinishingDuringWaitIsClosingFailure(t *testing.T) {
 		return errors.Is(err, typewirego.ErrClosing)
 	})
 	g.open()
-	r := recv(t, rc, "resolve")
-	if r.v != nil || !errors.Is(r.err, typewirego.ErrClosing) {
-		t.Fatalf("caller got %v, %v; want ErrClosing", r.v, r.err)
+	for range 3 {
+		r := recv(t, rc, "resolve")
+		if r.v != nil || !errors.Is(r.err, typewirego.ErrClosing) {
+			t.Fatalf("%s caller got %v, %v; want ErrClosing", r.label, r.v, r.err)
+		}
+		if r.label == "t.F" && !errors.Is(r.err, boom) {
+			t.Fatalf("t.F caller got %v, want its creator error too", r.err)
+		}
 	}
 	if err := recv(t, done, "teardown"); err != nil {
 		t.Fatal(err)
+	}
+	for _, label := range []string{"t.S", "t.F", "t.T"} {
+		if ok := o.find(typewirego.EventResolveOK, label); ok != nil {
+			t.Errorf("%s: resolve-ok %+v for a value its caller never got", label, ok)
+		}
+		failed := o.find(typewirego.EventResolveFailed, label)
+		if failed == nil || failed.ErrClass != "closing" {
+			t.Errorf("%s: resolve-failed = %+v, want class closing", label, failed)
+		}
 	}
 }
 

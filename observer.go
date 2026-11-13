@@ -46,7 +46,9 @@ const (
 //   - resolve-start, resolve-ok, resolve-failed: Path, the label chain from
 //     the root resolve, or from the nearest creator that has since returned,
 //     to this token, so a later event's Path can be shorter than the start's;
-//     ok and failed add Duration, ok adds Closer, failed adds ErrClass.
+//     ok and failed add Duration, ok adds Closer, failed adds ErrClass. ok
+//     means the callers get the value: a creation that finishes during
+//     Teardown's wait or after it is failed, with the class its callers get.
 //   - cycle-detected: Path, the cycle's labels.
 //   - closing: InFlight, the node ids of the creations still running.
 //   - cleanup-start, cleanup-ok, cleanup-failed: Closer; ok and failed add

@@ -111,10 +111,11 @@
 // Teardown enters Closing, cancels the abort context and waits for in-flight
 // creations, bounded by its context. A creation finishing during that wait,
 // singleton or transient, is never cached or returned: it is cleaned in the
-// same pass, and its callers get ErrClosing. Such a transient is kept only for
-// its own cleanup and never claims or demotes an owner: it closes nothing when
-// it is KeepOpen or another creation already owns its value, and otherwise
-// closes the value once. If a singleton then finishes with that same value
+// same pass, its callers get ErrClosing, and the observer sees resolve-failed
+// with the class its callers get, never resolve-ok. Such a transient is kept
+// only for its own cleanup and never claims or demotes an owner: it closes
+// nothing when it is KeepOpen or another creation already owns its value, and
+// otherwise closes the value once. If a singleton then finishes with that same value
 // during the same wait, the singleton owns it and closes it at its own slot,
 // takes over the transient's token, so a running creation that imported that
 // transient still holds the value back, and the transient closes nothing; after

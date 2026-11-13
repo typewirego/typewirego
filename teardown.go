@@ -28,8 +28,9 @@ func (c *Container) finish(i *inst, v any, err error) {
 	if err != nil {
 		i.err = &CreatorError{Label: i.label, Cause: err}
 		i.closing = c.state != stateOpen && !late
+		_, rerr := i.result()
 		c.emitLocked(Event{Kind: EventResolveFailed, NodeID: s.id, Label: i.label, Path: path,
-			Duration: dur, ErrClass: errClass(i.err)})
+			Duration: dur, ErrClass: errClass(rerr)})
 		i.cancelLife()
 		close(i.done)
 		c.mu.Unlock()
@@ -47,8 +48,16 @@ func (c *Container) finish(i *inst, v any, err error) {
 	default:
 		c.finishOpenLocked(i)
 	}
-	c.emitLocked(Event{Kind: EventResolveOK, NodeID: s.id, Label: i.label, Path: path,
-		Duration: dur, Closer: c.reportedCloserLocked(i).String()})
+	// resolve-ok means the callers get the value. A creation finishing during
+	// Teardown's wait or after it is cleaned, never returned, so it is a
+	// failure with the class its callers get.
+	if _, rerr := i.result(); rerr != nil {
+		c.emitLocked(Event{Kind: EventResolveFailed, NodeID: s.id, Label: i.label, Path: path,
+			Duration: dur, ErrClass: errClass(rerr)})
+	} else {
+		c.emitLocked(Event{Kind: EventResolveOK, NodeID: s.id, Label: i.label, Path: path,
+			Duration: dur, Closer: c.reportedCloserLocked(i).String()})
+	}
 	close(i.done)
 	c.mu.Unlock()
 	if late {
