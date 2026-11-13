@@ -379,7 +379,7 @@ func (c *Container) getCached(t Token, from *frame) (any, error) {
 	defer c.mu.Unlock()
 	s := c.slots[t]
 	if s == nil {
-		return nil, notRegistered(t)
+		return nil, notRegistered(t, c.state != stateOpen)
 	}
 	if from != nil {
 		c.recordImportLocked(from, t)

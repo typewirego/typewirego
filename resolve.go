@@ -172,7 +172,11 @@ func (c *Container) resolve(ctx context.Context, from *frame, t Token) (any, err
 	c.mu.Lock()
 	chain := activeChain(from)
 	if c.state != stateOpen {
-		if from != nil && c.slots[t] != nil {
+		if c.slots[t] == nil {
+			c.mu.Unlock()
+			return nil, notRegistered(t, true)
+		}
+		if from != nil {
 			c.recordImportLocked(from, t)
 		}
 		c.mu.Unlock()
@@ -185,7 +189,7 @@ func (c *Container) resolve(ctx context.Context, from *frame, t Token) (any, err
 	s := c.slots[t]
 	if s == nil {
 		c.mu.Unlock()
-		return nil, notRegistered(t)
+		return nil, notRegistered(t, false)
 	}
 	if from != nil {
 		c.recordImportLocked(from, t)

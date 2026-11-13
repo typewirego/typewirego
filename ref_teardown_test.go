@@ -453,6 +453,78 @@ func TestBlockedCloserPanickingLateIsReportedByWaitAndStats(t *testing.T) {
 	}
 }
 
+func TestNeverBoundTokenAfterTeardownBeginsIsNotRegisteredAndClosing(t *testing.T) {
+	// P1 and P9 both apply: a token that was never bound fails with
+	// ErrWireNotRegistered, and once Teardown has begun the error also matches
+	// ErrClosing, from every Resolver and GetCached alike.
+	never := typewirego.Of(typewirego.Opts[string]{Token: "t.Never",
+		Creator: func(context.Context) (string, error) { return "never", nil }}).Token()
+	both := func(where string, err error) {
+		t.Helper()
+		if !errors.Is(err, typewirego.ErrWireNotRegistered) || !errors.Is(err, typewirego.ErrClosing) {
+			t.Errorf("%s: got %v, want ErrWireNotRegistered and ErrClosing", where, err)
+		}
+		if got := typewirego.ErrClassOf(err); got != "not_registered" {
+			t.Errorf("%s: class %q, want not_registered", where, got)
+		}
+	}
+
+	// Before Teardown: not registered only.
+	g := newGate()
+	var creatorResolver typewirego.Resolver
+	running := typewirego.Of(typewirego.Opts[string]{Token: "t.Running",
+		CreateWith: func(_ context.Context, _ typewirego.Deps, r typewirego.Resolver) (string, error) {
+			creatorResolver = r
+			g.enter()
+			return "running", nil
+		}})
+	var flushErr error
+	c, o := observed(func(o *recObserver) {
+		o.flush = func(context.Context) error {
+			_, flushErr = o.r.Resolve(bg(), never)
+			return nil
+		}
+	})
+	apply(t, c, running)
+	if _, err := c.Resolve(bg(), never); !errors.Is(err, typewirego.ErrWireNotRegistered) || errors.Is(err, typewirego.ErrClosing) {
+		t.Fatalf("open: got %v, want ErrWireNotRegistered only", err)
+	}
+	go c.Resolve(bg(), running.Token())
+	waitClosed(t, g.started, "creator")
+
+	// Closing: Teardown waits on the running creator.
+	done := make(chan error, 1)
+	go func() { done <- c.Teardown(bg()) }()
+	eventually(t, "closing", func() bool {
+		_, err := c.GetCached(running.Token())
+		return errors.Is(err, typewirego.ErrClosing)
+	})
+	_, err := c.Resolve(bg(), never)
+	both("Resolve while closing", err)
+	_, err = c.GetCached(never)
+	both("GetCached while closing", err)
+	_, err = creatorResolver.Resolve(bg(), never)
+	both("a creator's Resolve while closing", err)
+	_, err = creatorResolver.GetCached(never)
+	both("a creator's GetCached while closing", err)
+	_, err = o.r.Resolve(bg(), never)
+	both("the observer's Resolve while closing", err)
+	g.open()
+	if err := recv(t, done, "teardown"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Closed.
+	_, err = c.Resolve(bg(), never)
+	both("Resolve after Teardown", err)
+	_, err = c.GetCached(never)
+	both("GetCached after Teardown", err)
+	both("the observer's Resolve in Flush", flushErr)
+	if !errors.Is(flushErr, typewirego.ErrObserverResolve) {
+		t.Errorf("the observer's Resolve in Flush: got %v, want a refusal too", flushErr)
+	}
+}
+
 // panicCloser panics with v from Close, after block when it is set.
 type panicCloser struct {
 	v     any
@@ -557,6 +629,13 @@ func TestBlockedCloserHoldsBackItsImportInTheObserverSet(t *testing.T) {
 	}
 	if got := log.get(); !slices.Equal(got, []string{"flush"}) {
 		t.Fatalf("cleaned %v; the sink must wait for the blocked closer that imports it", got)
+	}
+	// The sink is held back, not cleaned after Flush: closed lists it once,
+	// in HeldBack.
+	sinkID, _ := typewirego.NodeIDOf(c, sink.Token())
+	closed := o.find(typewirego.EventClosed, "")
+	if closed == nil || !slices.Equal(closed.HeldBack, []string{sinkID}) || len(closed.Remaining) != 0 {
+		t.Fatalf("closed = %+v, want %s in HeldBack only", closed, sinkID)
 	}
 	close(blocked.block)
 	if err := c.Wait(ctxWithTimeout(t)); err != nil {

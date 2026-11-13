@@ -513,7 +513,16 @@ wait:
 	closed := Event{Kind: EventClosed, InFlight: c.inFlightIDsLocked(), HeldBack: idsOf(c.heldBack),
 		ErrorCount: len(errs)}
 	if c.obs != nil {
-		closed.Remaining = idsOf(c.obs.set)
+		// Remaining is what the observer-set pass will clean after Flush: a
+		// member already held back is cleaned late instead, and is listed
+		// once, in HeldBack.
+		remaining := map[*inst]bool{}
+		for i := range c.obs.set {
+			if !c.heldBack[i] {
+				remaining[i] = true
+			}
+		}
+		closed.Remaining = idsOf(remaining)
 	}
 	c.emitLocked(closed)
 	c.state = stateClosed

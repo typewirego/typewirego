@@ -67,7 +67,9 @@
 // value gets no cleanup (P8). Singleton values are cleaned; the container never
 // retains a transient that reached its caller, so it never closes one. Teardown
 // cleans in reverse creation order, once, and returns every cleanup failure joined
-// (P10); the container is single-use afterwards (P9).
+// (P10); the container is single-use afterwards (P9): every resolve then fails
+// with ErrClosing, and one of a token that was never bound matches both
+// ErrWireNotRegistered and ErrClosing.
 //
 // A wire owns what its creator creates, and the container assumes it does:
 // it closes every singleton value with a closer unless the wire says otherwise.

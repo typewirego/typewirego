@@ -14,6 +14,12 @@ All notable changes to typewirego are documented here. The format follows
 - A recovered panic whose value is an `error` is reachable through `errors.Is` and
   `errors.As`, from creators and closers alike. The `cleanup-failed` `ErrClass` of
   such a panic is now the panic value's type, not `*typewirego.panicError` (#9).
+- Resolving or `GetCached` of a token that was never bound, once Teardown has begun,
+  matches both `ErrWireNotRegistered` and `ErrClosing` (class `not_registered`).
+  `Resolve` returned only `ErrClosing` and `GetCached` only `ErrWireNotRegistered`
+  (#10).
+- The `closed` event lists an observer-set value that is already held back in
+  `HeldBack` only, not also in `Remaining` (#10).
 
 ## 0.1.0
 

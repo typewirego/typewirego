@@ -112,7 +112,12 @@ func (e *panicError) Unwrap() error {
 // errGoexit is the cause of a creator that called runtime.Goexit.
 var errGoexit = errors.New("typewirego: creator called runtime.Goexit")
 
-func notRegistered(t Token) error {
+// notRegistered is a token that was never bound. Once Teardown has begun it
+// also matches ErrClosing: both rules apply, and ErrClass picks not_registered.
+func notRegistered(t Token, closing bool) error {
+	if closing {
+		return fmt.Errorf("%w: %w: %s", ErrWireNotRegistered, ErrClosing, t.Label())
+	}
 	return fmt.Errorf("%w: %s", ErrWireNotRegistered, t.Label())
 }
 

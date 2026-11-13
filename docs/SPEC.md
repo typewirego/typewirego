@@ -74,7 +74,8 @@ wire registers its imports recursively, skipping any already bound.
   declared imports through the Resolver it is given, when and only if it is
   called. A test double therefore never dials the real dependency, while the
   declared imports stay registered.
-- A token never bound fails to resolve with `ErrWireNotRegistered`. `Bind(nil)`
+- A token never bound fails to resolve with `ErrWireNotRegistered`. Once
+  Teardown has begun the error also matches `ErrClosing` (P9). `Bind(nil)`
   panics.
 
 Pinned by:
@@ -270,11 +271,16 @@ A container is single-use. Once Teardown begins, every resolve fails with
 hits and set members that P16 still serves.
 
 - Go API: `ErrClosing`.
+- A token that was never bound is covered by P1 and P9 at once: from every
+  Resolver and `GetCached`, its error matches both `ErrWireNotRegistered` and
+  `ErrClosing`, so its `ErrClass` is `not_registered`. After closed, the
+  observer's Resolver also refuses it with `ErrObserverResolve`.
 
 Pinned by:
 
 - case "a resolve after teardown fails with closing"
-- also `TestP12TeardownRejectsNewResolvesWithErrClosing`
+- also `TestP12TeardownRejectsNewResolvesWithErrClosing`,
+  `TestNeverBoundTokenAfterTeardownBeginsIsNotRegisteredAndClosing`
 
 ## P10 Every cleanup runs, every failure is returned
 
@@ -476,6 +482,10 @@ then the observer set.
 
 - Go API: `Node.ObserverPulled`, `Event.Remaining`.
 - A wait that ends without a value leaves nothing in the set.
+- The `closed` event lists the set in `Remaining`, less any member already
+  held back when it is queued (by a cleanup call Teardown stopped waiting
+  for): that member is cleaned late, not after Flush, and is listed once, in
+  `HeldBack`.
 - The held-back closure counts a value a running creator is waiting on, so a
   latch that opened just before the snapshot cannot leave that value in the
   main pass.
@@ -491,7 +501,8 @@ Pinned by:
 - `TestP17UndeliveredEventCountsInStatsNotError`
 - also `TestCancelledObserverWaitLeavesNoObserverSetMember`,
   `TestObserverPullWakingAfterTheTeardownSnapshotIsInTheObserverSet`,
-  `TestObserverPullRacingTeardownNeverLeavesTheSinkInTheMainPass`
+  `TestObserverPullRacingTeardownNeverLeavesTheSinkInTheMainPass`,
+  `TestBlockedCloserHoldsBackItsImportInTheObserverSet`
 
 ## P18 Two contexts
 
@@ -641,7 +652,7 @@ reach every sentinel and carrier through `*CreatorError` (which unwraps to its
 | Sentinel | Carrier | Meaning |
 |---|---|---|
 | `ErrCircularDependency` | `*CircularDependencyError` (`Path`) | A resolve that would wait on itself (P7, P11) |
-| `ErrWireNotRegistered` | — | A token never bound, or a wire the observer requires is unbound (P1, P16) |
+| `ErrWireNotRegistered` | — | A token never bound, or a wire the observer requires is unbound (P1, P16); once Teardown has begun, also `ErrClosing` (P9) |
 | `ErrNotResolved` | — | `GetCached` of a transient or an uncreated singleton; an observer cache miss |
 | `ErrNotImported` | — | `Dep` of a wire that is not a declared import |
 | `ErrClosing` | — | A resolve once Teardown has begun, other than what the observer's Resolver may still serve (P9, P12, P16) |
