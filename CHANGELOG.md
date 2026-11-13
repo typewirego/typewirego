@@ -8,12 +8,15 @@ All notable changes to typewirego are documented here. The format follows
 
 - A creation that finishes during Teardown's wait, or after it as a late creation,
   emits `resolve-failed` with the class its callers get (usually `closing`), not
-  `resolve-ok` (#7).
+  `resolve-ok`. A creator that fails there now reports that class too, not
+  `creator` (#7).
 - `CircularDependencyError.Path` and the `cycle-detected` event name the transient
   frames on a wait-for cycle (#8).
 - A recovered panic whose value is an `error` is reachable through `errors.Is` and
-  `errors.As`, from creators and closers alike. The `cleanup-failed` `ErrClass` of
-  such a panic is now the panic value's type, not `*typewirego.panicError` (#9).
+  `errors.As`, from creators and closers alike, so its `ErrClass` follows the
+  panic value: a creator panicking with `context.Canceled` reports `canceled`,
+  not `creator`, and the `cleanup-failed` class of such a panic is the panic
+  value's, not `*typewirego.panicError` (#9).
 - Resolving or `GetCached` of a token that was never bound, once Teardown has begun,
   matches both `ErrWireNotRegistered` and `ErrClosing` (class `not_registered`).
   `Resolve` returned only `ErrClosing` and `GetCached` only `ErrWireNotRegistered`

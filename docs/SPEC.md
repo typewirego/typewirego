@@ -92,7 +92,8 @@ Pinned by:
 - case "graph marks a wire bound again by an override as overridden"
 - also `TestWithCreatorResolvesDeclaredImportsOnlyWhenOriginalRuns`,
   `TestWithCreatorKeepsKeepOpen`, `TestDepRejectsAWireOutsideTheImports`,
-  `TestOfPanicsOnInvalidOptions`
+  `TestOfPanicsOnInvalidOptions`,
+  `TestNeverBoundTokenAfterTeardownBeginsIsNotRegisteredAndClosing`
 
 ## P2 Lazy creation
 
@@ -206,7 +207,8 @@ Pinned by:
 - case "a runtime resolve without a cycle succeeds"
 - also `TestCreatorResolvingItsOwnTokenWhileRunningIsACycle`,
   `TestCreatorResolverOutlivesItsCreatorWithoutAFalseCycle`,
-  `TestCreationBelowAnEndedCreatorResolvesItWithoutACycle`
+  `TestCreationBelowAnEndedCreatorResolvesItWithoutACycle`,
+  `TestResolverWaitOutlivingItsCreatorStillGetsTheValue`
 
 ## P8 Teardown order and cleanup by value
 
@@ -271,10 +273,12 @@ A container is single-use. Once Teardown begins, every resolve fails with
 hits and set members that P16 still serves.
 
 - Go API: `ErrClosing`.
-- A token that was never bound is covered by P1 and P9 at once: from every
-  Resolver and `GetCached`, its error matches both `ErrWireNotRegistered` and
-  `ErrClosing`, so its `ErrClass` is `not_registered`. After closed, the
-  observer's Resolver also refuses it with `ErrObserverResolve`.
+- A token that was never bound is covered by P1 and P9 at once: from
+  `GetCached` and every Resolver, its error matches both
+  `ErrWireNotRegistered` and `ErrClosing`, so its `ErrClass` is
+  `not_registered`. After closed, the observer's Resolver also refuses it with
+  `ErrObserverResolve`. A disabled observer's Resolver is the exception: it
+  refuses every token with `ErrObserverResolve` and `ErrNotResolved` (P14).
 
 Pinned by:
 
@@ -363,7 +367,8 @@ Pinned by:
 - `TestP12TeardownIsSerialized`
 - also `TestTransientFinishingDuringClosingIsClosedInThatPass`,
   `TestSingletonFinishingDuringClosingOwnsAClosingTransientsValue`,
-  `TestClosingTransientDoesNotDemoteOrDoubleCloseAnOwnedValue`
+  `TestClosingTransientDoesNotDemoteOrDoubleCloseAnOwnedValue`,
+  `TestP19LateCreationIsClosingFailure`
 
 ## P13 Container context for singleton creators
 
@@ -440,7 +445,8 @@ Pinned by:
 - `TestP15OnEventNeverOverlapsFlush`
 - `TestP15EventOrderUnderConcurrentResolves`
 - also `TestEventsCarryNodeIDsDurationsAndCloser`,
-  `TestP19CreationFinishingDuringWaitIsClosingFailure`
+  `TestP19CreationFinishingDuringWaitIsClosingFailure`,
+  `TestP19LateCreationIsClosingFailure`
 
 ## P16 The observer's Resolver is enforced
 
@@ -569,7 +575,8 @@ Pinned by:
 - `TestP19LateCreatorCleansOnlyItsOwnValue`
 - `TestP19HeldBackClosureCleanedOnceByLastFinisher`
 - `TestP19CreationFinishingDuringWaitIsClosingFailure`
-- also `TestTeardownStopsWaitingForABlockedCloserAtItsDeadline`,
+- also `TestP19LateCreationIsClosingFailure`,
+  `TestTeardownStopsWaitingForABlockedCloserAtItsDeadline`,
   `TestTwoLateCreatorsShareOneHeldBackImport`,
   `TestRunningImporterHoldsAnOwnedValueItGotThroughATransient`,
   `TestHeldBackCleanupAfterTeardownFinishesLastIgnoresTheTeardownContext`

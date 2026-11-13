@@ -69,7 +69,8 @@
 // cleans in reverse creation order, once, and returns every cleanup failure joined
 // (P10); the container is single-use afterwards (P9): every resolve then fails
 // with ErrClosing, and one of a token that was never bound matches both
-// ErrWireNotRegistered and ErrClosing.
+// ErrWireNotRegistered and ErrClosing, except through a disabled observer's
+// resolver, which refuses every token alike.
 //
 // A wire owns what its creator creates, and the container assumes it does:
 // it closes every singleton value with a closer unless the wire says otherwise.
@@ -116,7 +117,8 @@
 // creations, bounded by its context. A creation finishing during that wait,
 // singleton or transient, is never cached or returned: it is cleaned in the
 // same pass, its callers get ErrClosing, and the observer sees resolve-failed
-// with the class its callers get, never resolve-ok. Such a transient is kept
+// with the class its callers get, never resolve-ok; so does a late creation,
+// one still running when the wait ends. Such a transient is kept
 // only for its own cleanup and never claims or demotes an owner: it closes
 // nothing when it is KeepOpen or another creation already owns its value, and
 // otherwise closes the value once. If a singleton then finishes with that same value
@@ -212,7 +214,9 @@
 // once, after that OnEvent returns and the drainer exits or that Flush returns,
 // by the last participant under the late context; Wait waits for that. The closed
 // event was queued before the drainer stop, so it lists them in Remaining,
-// not HeldBack, when it is delivered at all. The drainer goroutine exits only in
+// not HeldBack, when it is delivered at all. A set member already held back
+// when closed is queued, by a cleanup call Teardown stopped waiting for, is
+// cleaned late instead of after Flush, and closed lists it once, in HeldBack. The drainer goroutine exits only in
 // Teardown, so a container with an observer must be torn down.
 //
 // # Errors
