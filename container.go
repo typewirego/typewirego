@@ -81,6 +81,9 @@ type Container struct {
 	// afterWake is a test hook run by a waiter after its wait ends and
 	// before it takes the lock again.
 	afterWake func(t Token)
+	// beforeClosed is a test hook run by Teardown after the main pass and
+	// before it queues the closed event.
+	beforeClosed func()
 }
 
 type statsCounters struct {

@@ -508,6 +508,9 @@ wait:
 
 	var errs []error
 	c.runPass(ctx, main, &errs, tt)
+	if c.beforeClosed != nil {
+		c.beforeClosed()
+	}
 
 	c.mu.Lock()
 	closed := Event{Kind: EventClosed, InFlight: c.inFlightIDsLocked(), HeldBack: idsOf(c.heldBack),

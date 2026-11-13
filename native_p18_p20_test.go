@@ -311,6 +311,85 @@ func TestP19CreationFinishingDuringWaitIsClosingFailure(t *testing.T) {
 	}
 }
 
+func TestP19LateCreationIsClosingFailure(t *testing.T) {
+	// Creations still running when Teardown stops waiting finish late, before
+	// the closed event: each caller gets ErrClosing, and the observer sees
+	// resolve-failed with that class, never resolve-ok (P12, P15).
+	g := newGate()
+	boom := errors.New("boom")
+	s := typewirego.Of(typewirego.Opts[string]{Token: "t.S", Creator: func(context.Context) (string, error) {
+		g.enter()
+		return "value", nil
+	}})
+	f := typewirego.Of(typewirego.Opts[string]{Token: "t.F", Creator: func(context.Context) (string, error) {
+		g.enter()
+		return "", boom
+	}})
+	c, o := observed(nil)
+	apply(t, c, s, f)
+	type result struct {
+		label string
+		v     any
+		err   error
+	}
+	rc := make(chan result, 2)
+	for _, w := range []typewirego.AnyWire{s, f} {
+		go func() {
+			v, err := c.Resolve(bg(), w.Token())
+			rc <- result{w.Token().Label(), v, err}
+		}()
+	}
+	eventually(t, "both creators to start", func() bool {
+		n := 0
+		for _, e := range o.got() {
+			if e.Kind == typewirego.EventResolveStart {
+				n++
+			}
+		}
+		return n == 2
+	})
+	// The creations are late by now; let them finish before closed is queued.
+	var got []result
+	typewirego.SetBeforeClosedHook(c, func() {
+		g.open()
+		for range 2 {
+			select {
+			case r := <-rc:
+				got = append(got, r)
+			case <-time.After(testTimeout):
+				return
+			}
+		}
+	})
+	tt := timeoutErr(t, c.Teardown(expiredCtx()))
+	if len(tt.Running) != 2 {
+		t.Fatalf("Running = %v, want both creations", tt.Running)
+	}
+	if len(got) != 2 {
+		t.Fatalf("callers returned %d results before closed, want 2", len(got))
+	}
+	for _, r := range got {
+		if r.v != nil || !errors.Is(r.err, typewirego.ErrClosing) {
+			t.Fatalf("%s caller got %v, %v; want ErrClosing", r.label, r.v, r.err)
+		}
+	}
+	if err := c.Wait(ctxWithTimeout(t)); err != nil {
+		t.Fatal(err)
+	}
+	if o.find(typewirego.EventClosed, "") == nil {
+		t.Fatal("closed was not delivered")
+	}
+	for _, label := range []string{"t.S", "t.F"} {
+		if ok := o.find(typewirego.EventResolveOK, label); ok != nil {
+			t.Errorf("%s: resolve-ok %+v for a value its caller never got", label, ok)
+		}
+		failed := o.find(typewirego.EventResolveFailed, label)
+		if failed == nil || failed.ErrClass != "closing" {
+			t.Errorf("%s: resolve-failed = %+v, want class closing", label, failed)
+		}
+	}
+}
+
 func TestP20FlushBudgetIsQuarterOfRemainingTime(t *testing.T) {
 	now := time.Now()
 	ctx, cancel := context.WithDeadline(bg(), now.Add(4*time.Second))
