@@ -144,7 +144,9 @@ Pinned by:
 A failed creation caches nothing; the next resolve retries. A creator whose
 import fails does not run, and fails with `*CreatorError` itself. A creator
 panic, or a creator that calls `runtime.Goexit`, is recovered into
-`*CreatorError` and releases its latch.
+`*CreatorError` and releases its latch. A panic value that is an `error` is
+reachable from that `*CreatorError` through `errors.Is` and `errors.As`, as a
+returned error is.
 
 - Go API: `*CreatorError`, `ErrCreator`.
 
@@ -153,7 +155,8 @@ Pinned by:
 - case "a failed creation is retried on the next resolve"
 - case "a failed import fails the importer without running its creator"
 - case "a failed creation caches nothing, so an override applied afterwards takes effect"
-- also `TestP11CreatorPanicReleasesLatch`, `TestCreatorGoexitReleasesLatch`
+- also `TestP11CreatorPanicReleasesLatch`, `TestCreatorGoexitReleasesLatch`,
+  `TestPanicErrorValueIsReachableThroughTheErrorChain`
 
 ## P6 Rebinding never clears a cache
 
@@ -280,7 +283,8 @@ completed, joined with `errors.Join`. Failures of the cleanups that finish
 after Teardown stopped waiting (late creations, calls left running, held-back
 values) are returned by `Wait` instead (P19); Flush results are never
 returned (P20). A closer that panics is recovered, fails its cleanup and is
-counted in `Stats.CleanupPanics`.
+counted in `Stats.CleanupPanics`; a panic value that is an `error` is reachable
+from the cleanup's error, so `ErrClass` follows it to its innermost type.
 
 - Go API: `Container.Teardown`'s error.
 
@@ -288,6 +292,8 @@ Pinned by:
 
 - case "teardown reports every cleanup failure and still runs every cleanup"
 - case "teardown with no cleanup failure returns no error"
+- also `TestBlockedCloserPanickingLateIsReportedByWaitAndStats`,
+  `TestPanicErrorValueIsReachableThroughTheErrorChain`
 
 ## P11 Concurrent resolution
 

@@ -52,7 +52,9 @@
 // NewContainer ctx, so a signal context ending at the start of a graceful drain
 // fails no creation; a caller's context bounds only that caller's wait (P13).
 // Transient creators run on the caller's goroutine under the caller's context.
-// A creator panic is recovered into *CreatorError and releases the latch.
+// A creator panic is recovered into *CreatorError and releases the latch; a
+// panic value that is an error is reachable from it through errors.Is and
+// errors.As, as a returned error is, and so is a closer's.
 // A value that needs a context outliving Closing, such as a background flusher,
 // takes Lifetime(deps), which ends only after that value's own cleanup.
 // A transient value's Lifetime is the container's, which ends once every cleanup

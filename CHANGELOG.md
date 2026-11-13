@@ -4,6 +4,17 @@ All notable changes to typewirego are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [semantic versioning](https://semver.org/) (pre-1.0: minor versions may break).
 
+## Unreleased
+
+- A creation that finishes during Teardown's wait, or after it as a late creation,
+  emits `resolve-failed` with the class its callers get (usually `closing`), not
+  `resolve-ok` (#7).
+- `CircularDependencyError.Path` and the `cycle-detected` event name the transient
+  frames on a wait-for cycle (#8).
+- A recovered panic whose value is an `error` is reachable through `errors.Is` and
+  `errors.As`, from creators and closers alike. The `cleanup-failed` `ErrClass` of
+  such a panic is now the panic value's type, not `*typewirego.panicError` (#9).
+
 ## 0.1.0
 
 Initial public release.

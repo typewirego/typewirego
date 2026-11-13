@@ -3,6 +3,7 @@ package typewirego_test
 import (
 	"context"
 	"errors"
+	"runtime"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -449,6 +450,89 @@ func TestBlockedCloserPanickingLateIsReportedByWaitAndStats(t *testing.T) {
 	}
 	if c.Stats().CleanupPanics != 1 {
 		t.Fatalf("CleanupPanics = %d", c.Stats().CleanupPanics)
+	}
+}
+
+// panicCloser panics with v from Close, after block when it is set.
+type panicCloser struct {
+	v     any
+	block chan struct{}
+}
+
+func (p *panicCloser) Close() error {
+	if p.block != nil {
+		<-p.block
+	}
+	panic(p.v)
+}
+
+func TestPanicErrorValueIsReachableThroughTheErrorChain(t *testing.T) {
+	errBoom := errors.New("boom")
+	panics := func(label string, scope typewirego.Scope, v any) typewirego.TypeWire[string] {
+		return typewirego.Of(typewirego.Opts[string]{Token: label, Scope: scope,
+			Creator: func(context.Context) (string, error) { panic(v) }})
+	}
+
+	// A creator panicking with an error: singleton and transient.
+	c := typewirego.NewContainer(bg())
+	single, trans := panics("t.Single", typewirego.Singleton, errBoom), panics("t.Trans", typewirego.Transient, errBoom)
+	apply(t, c, single, trans)
+	for _, w := range []typewirego.AnyWire{single, trans} {
+		_, err := c.Resolve(bg(), w.Token())
+		if !errors.Is(err, typewirego.ErrCreator) || !errors.Is(err, errBoom) {
+			t.Errorf("%s: got %v, want ErrCreator wrapping the panic value", w.Token().Label(), err)
+		}
+	}
+
+	// A runtime panic is reachable with errors.As.
+	var nilMap map[string]int
+	nilWrite := typewirego.Of(typewirego.Opts[string]{Token: "t.NilWrite",
+		Creator: func(context.Context) (string, error) { nilMap["x"] = 1; return "", nil }})
+	apply(t, c, nilWrite)
+	_, err := c.Resolve(bg(), nilWrite.Token())
+	var rerr runtime.Error
+	if !errors.As(err, &rerr) {
+		t.Errorf("got %v, want a runtime.Error through errors.As", err)
+	}
+
+	// A panic value that is not an error still fails with ErrCreator only.
+	text := panics("t.Text", typewirego.Singleton, "text")
+	apply(t, c, text)
+	if _, err := c.Resolve(bg(), text.Token()); !errors.Is(err, typewirego.ErrCreator) {
+		t.Errorf("got %v, want ErrCreator", err)
+	}
+	if err := c.Teardown(bg()); err != nil {
+		t.Fatal(err)
+	}
+
+	// A closer panicking with an error, reported by Teardown and by its event.
+	c, o := observed(nil)
+	closer := shared("t.Closer", &panicCloser{v: errBoom}, false)
+	textCloser := shared("t.TextCloser", &panicCloser{v: "text"}, false)
+	apply(t, c, closer, textCloser)
+	mustResolve(t, c, closer)
+	mustResolve(t, c, textCloser)
+	if err := c.Teardown(bg()); !errors.Is(err, errBoom) {
+		t.Errorf("Teardown = %v, want the panic value reachable", err)
+	}
+	// The event's class follows the chain to the panic value; a value that is
+	// not an error leaves the panic itself innermost.
+	for label, want := range map[string]string{"t.Closer": "*errors.errorString", "t.TextCloser": "*typewirego.panicError"} {
+		if e := o.find(typewirego.EventCleanupFailed, label); e == nil || e.ErrClass != want {
+			t.Errorf("%s cleanup-failed = %+v, want class %s", label, e, want)
+		}
+	}
+
+	// A late closer panicking with an error, reported by Wait.
+	late := &panicCloser{v: errBoom, block: make(chan struct{})}
+	lw := shared("t.Late", late, false)
+	c = typewirego.NewContainer(bg())
+	apply(t, c, lw)
+	mustResolve(t, c, lw)
+	timeoutErr(t, c.Teardown(expiredCtx()))
+	close(late.block)
+	if err := c.Wait(ctxWithTimeout(t)); !errors.Is(err, errBoom) {
+		t.Errorf("Wait = %v, want the panic value reachable", err)
 	}
 }
 
