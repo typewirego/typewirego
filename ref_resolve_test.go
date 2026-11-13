@@ -237,7 +237,10 @@ func TestWaitBegunByAnEndedCreatorsGoroutineIsNoCycle(t *testing.T) {
 }
 
 func TestWaitForCycleThroughATransientFrame(t *testing.T) {
-	xIn, yIn := make(chan struct{}), make(chan struct{})
+	// X resolves the transient T inline, T waits on Y's latch, then Y asks for
+	// X. The wait is booked against X, but the reported path must still name
+	// the transient frame that is actually waiting.
+	xIn, yIn, yAsks := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	var x, y typewirego.TypeWire[string]
 	tr := typewirego.Of(typewirego.Opts[string]{Token: "t.T", Scope: typewirego.Transient,
 		CreateWith: func(ctx context.Context, _ typewirego.Deps, r typewirego.Resolver) (string, error) {
@@ -255,20 +258,36 @@ func TestWaitForCycleThroughATransientFrame(t *testing.T) {
 		CreateWith: func(ctx context.Context, _ typewirego.Deps, r typewirego.Resolver) (string, error) {
 			close(yIn)
 			<-xIn
+			<-yAsks
 			_, err := r.Resolve(ctx, x.Token())
 			return "y", err
 		}})
-	c := typewirego.NewContainer(bg())
+	c, o := observed(nil)
 	defer c.Teardown(bg())
 	apply(t, c, x, y, tr)
 	ctx := ctxWithTimeout(t)
 	errs := make(chan error, 2)
 	go func() { _, err := c.Resolve(ctx, x.Token()); errs <- err }()
 	go func() { _, err := c.Resolve(ctx, y.Token()); errs <- err }()
+	// Y's latch has two waiters once T waits on it: the root resolve of Y and T.
+	eventually(t, "T waiting on Y", func() bool { return typewirego.LatchWaiters(c, y.Token()) == 2 })
+	close(yAsks)
+	want := []string{"t.Y", "t.X", "t.T", "t.Y"}
 	for range 2 {
-		if err := recv(t, errs, "root"); !errors.Is(err, typewirego.ErrCircularDependency) {
+		err := recv(t, errs, "root")
+		var cyc *typewirego.CircularDependencyError
+		if !errors.As(err, &cyc) {
 			t.Fatalf("got %v, want a cycle", err)
 		}
+		if !slices.Equal(cyc.Path, want) {
+			t.Fatalf("cycle path = %v, want %v", cyc.Path, want)
+		}
+	}
+	eventually(t, "the cycle-detected event", func() bool {
+		return o.find(typewirego.EventCycleDetected, "") != nil
+	})
+	if e := o.find(typewirego.EventCycleDetected, ""); !slices.Equal(e.Path, want) {
+		t.Fatalf("cycle-detected path = %v, want %v", e.Path, want)
 	}
 }
 

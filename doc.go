@@ -40,7 +40,8 @@
 // at a creator that has returned, since it waits on nothing. Across goroutines,
 // a resolve about to wait on another creation first walks the wait-for graph;
 // if that creation transitively waits on the caller's own chain, the resolve fails
-// with the same error (P11).
+// with the same error (P11). Its Path names every frame on the cycle, the
+// transient frames that are waiting included.
 //
 // # Concurrency and contexts
 //

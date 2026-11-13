@@ -300,7 +300,8 @@ context bounds only its own wait is P13.)
   the wait-for graph. If that creation transitively waits on the caller's own
   chain, the resolve fails with `*CircularDependencyError` instead of
   deadlocking. Transient creators run inline, so their waits count as their
-  enclosing creator's.
+  enclosing creator's. The error's `Path`, and the `cycle-detected` event's,
+  still name every frame on the cycle, the waiting transient frames included.
 
 Pinned by:
 

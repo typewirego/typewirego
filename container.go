@@ -212,7 +212,7 @@ type inst struct {
 	err   error
 
 	imports map[Token]bool
-	waits   map[*inst]int
+	waits   map[*inst]map[*frame]int // creation waited on -> waiting frame -> count
 	// waiters counts the resolves currently waiting on this creation.
 	waiters int
 
