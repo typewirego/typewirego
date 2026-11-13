@@ -94,17 +94,30 @@ func (e *TeardownTimeoutError) Is(target error) bool {
 	return target == ErrTeardownTimeout
 }
 
-// panicError is a recovered panic, kept as an error with its value.
+// panicError is a recovered panic, kept as an error with its value. A value
+// that is an error is reachable through errors.Is and errors.As, as a
+// returned error is.
 type panicError struct {
 	value any
 }
 
 func (e *panicError) Error() string { return fmt.Sprintf("typewirego: panic: %v", e.value) }
 
+// Unwrap returns the panic value when it is an error, and nil otherwise.
+func (e *panicError) Unwrap() error {
+	err, _ := e.value.(error)
+	return err
+}
+
 // errGoexit is the cause of a creator that called runtime.Goexit.
 var errGoexit = errors.New("typewirego: creator called runtime.Goexit")
 
-func notRegistered(t Token) error {
+// notRegistered is a token that was never bound. Once Teardown has begun it
+// also matches ErrClosing: both rules apply, and ErrClass picks not_registered.
+func notRegistered(t Token, closing bool) error {
+	if closing {
+		return fmt.Errorf("%w: %w: %s", ErrWireNotRegistered, ErrClosing, t.Label())
+	}
 	return fmt.Errorf("%w: %s", ErrWireNotRegistered, t.Label())
 }
 

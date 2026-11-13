@@ -62,6 +62,15 @@ func framePath(fr *frame) []string {
 
 // waiterOf is the running singleton creation whose goroutine a resolve from
 // chain blocks: the nearest singleton frame up the active chain.
+// waitingFrame returns a frame of waiter's chain that waits on target: the
+// waiter's own frame, or a transient frame below it.
+func waitingFrame(waiter, target *inst) *frame {
+	for f := range waiter.waits[target] {
+		return f
+	}
+	return nil
+}
+
 func waiterOf(chain *frame) *inst {
 	for f := chain; f != nil && !f.ended; f = f.parent {
 		if f.inst != nil && f.inst.scope == Singleton {
@@ -129,9 +138,17 @@ func (c *Container) waitCycleLocked(chain *frame, target *inst) []string {
 		cur := queue[0]
 		queue = queue[1:]
 		if mine[cur] {
+			// Built backwards from cur to target. Between a waiter and the
+			// creation it waits on go the transient frames that are actually
+			// waiting, deepest first, since waits are booked to the singleton.
 			var tail []string
 			for n := cur; n != nil; n = prev[n] {
 				tail = append(tail, n.label)
+				if p := prev[n]; p != nil {
+					for f := waitingFrame(p, n); f != nil && f != p.fr; f = f.parent {
+						tail = append(tail, f.label)
+					}
+				}
 			}
 			for i, j := 0, len(tail)-1; i < j; i, j = i+1, j-1 {
 				tail[i], tail[j] = tail[j], tail[i]
@@ -155,7 +172,11 @@ func (c *Container) resolve(ctx context.Context, from *frame, t Token) (any, err
 	c.mu.Lock()
 	chain := activeChain(from)
 	if c.state != stateOpen {
-		if from != nil && c.slots[t] != nil {
+		if c.slots[t] == nil {
+			c.mu.Unlock()
+			return nil, notRegistered(t, true)
+		}
+		if from != nil {
 			c.recordImportLocked(from, t)
 		}
 		c.mu.Unlock()
@@ -168,7 +189,7 @@ func (c *Container) resolve(ctx context.Context, from *frame, t Token) (any, err
 	s := c.slots[t]
 	if s == nil {
 		c.mu.Unlock()
-		return nil, notRegistered(t)
+		return nil, notRegistered(t, false)
 	}
 	if from != nil {
 		c.recordImportLocked(from, t)
@@ -206,7 +227,12 @@ func (c *Container) resolve(ctx context.Context, from *frame, t Token) (any, err
 func (c *Container) awaitLocked(ctx context.Context, chain *frame, cr *inst) (any, error) {
 	waiter := waiterOf(chain)
 	if waiter != nil {
-		waiter.waits[cr]++
+		m := waiter.waits[cr]
+		if m == nil {
+			m = map[*frame]int{}
+			waiter.waits[cr] = m
+		}
+		m[chain]++
 	}
 	cr.waiters++
 	c.mu.Unlock()
@@ -221,8 +247,15 @@ func (c *Container) awaitLocked(ctx context.Context, chain *frame, cr *inst) (an
 	defer c.mu.Unlock()
 	cr.waiters--
 	if waiter != nil {
-		if waiter.waits[cr]--; waiter.waits[cr] <= 0 {
-			delete(waiter.waits, cr)
+		// The waiter may have finished meanwhile, since a goroutine using its
+		// Resolver can outlive it, and finish cleared its waits.
+		if m := waiter.waits[cr]; m != nil {
+			if m[chain]--; m[chain] <= 0 {
+				delete(m, chain)
+			}
+			if len(m) == 0 {
+				delete(waiter.waits, cr)
+			}
 		}
 	}
 	select {
@@ -246,7 +279,7 @@ func (c *Container) newInstLocked(s *slot, parent *frame) *inst {
 		started:  time.Now(),
 		done:     make(chan struct{}),
 		imports:  map[Token]bool{},
-		waits:    map[*inst]int{},
+		waits:    map[*inst]map[*frame]int{},
 	}
 	i.fr = &frame{token: s.token, label: i.label, parent: parent, inst: i}
 	if i.scope == Singleton {

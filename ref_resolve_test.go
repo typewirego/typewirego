@@ -237,7 +237,10 @@ func TestWaitBegunByAnEndedCreatorsGoroutineIsNoCycle(t *testing.T) {
 }
 
 func TestWaitForCycleThroughATransientFrame(t *testing.T) {
-	xIn, yIn := make(chan struct{}), make(chan struct{})
+	// X resolves the transient T inline, T waits on Y's latch, then Y asks for
+	// X. The wait is booked against X, but the reported path must still name
+	// the transient frame that is actually waiting.
+	xIn, yIn, yAsks := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	var x, y typewirego.TypeWire[string]
 	tr := typewirego.Of(typewirego.Opts[string]{Token: "t.T", Scope: typewirego.Transient,
 		CreateWith: func(ctx context.Context, _ typewirego.Deps, r typewirego.Resolver) (string, error) {
@@ -255,20 +258,81 @@ func TestWaitForCycleThroughATransientFrame(t *testing.T) {
 		CreateWith: func(ctx context.Context, _ typewirego.Deps, r typewirego.Resolver) (string, error) {
 			close(yIn)
 			<-xIn
+			<-yAsks
 			_, err := r.Resolve(ctx, x.Token())
 			return "y", err
 		}})
-	c := typewirego.NewContainer(bg())
+	c, o := observed(nil)
 	defer c.Teardown(bg())
 	apply(t, c, x, y, tr)
 	ctx := ctxWithTimeout(t)
 	errs := make(chan error, 2)
 	go func() { _, err := c.Resolve(ctx, x.Token()); errs <- err }()
 	go func() { _, err := c.Resolve(ctx, y.Token()); errs <- err }()
+	// Y's latch has two waiters once T waits on it: the root resolve of Y and T.
+	eventually(t, "T waiting on Y", func() bool { return typewirego.LatchWaiters(c, y.Token()) == 2 })
+	close(yAsks)
+	want := []string{"t.Y", "t.X", "t.T", "t.Y"}
 	for range 2 {
-		if err := recv(t, errs, "root"); !errors.Is(err, typewirego.ErrCircularDependency) {
+		err := recv(t, errs, "root")
+		var cyc *typewirego.CircularDependencyError
+		if !errors.As(err, &cyc) {
 			t.Fatalf("got %v, want a cycle", err)
 		}
+		if !slices.Equal(cyc.Path, want) {
+			t.Fatalf("cycle path = %v, want %v", cyc.Path, want)
+		}
+	}
+	eventually(t, "the cycle-detected event", func() bool {
+		return o.find(typewirego.EventCycleDetected, "") != nil
+	})
+	if e := o.find(typewirego.EventCycleDetected, ""); !slices.Equal(e.Path, want) {
+		t.Fatalf("cycle-detected path = %v, want %v", e.Path, want)
+	}
+}
+
+func TestResolverWaitOutlivingItsCreatorStillGetsTheValue(t *testing.T) {
+	// A's creator hands its Resolver to a goroutine that waits on B's latch,
+	// then returns. When B finishes, that goroutine still gets B's value: the
+	// creator's Resolver stays usable after it returns.
+	bIn, bRelease, aRelease := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	b := typewirego.Of(typewirego.Opts[string]{Token: "t.B", Creator: func(context.Context) (string, error) {
+		close(bIn)
+		<-bRelease
+		return "b", nil
+	}})
+	type result struct {
+		v   string
+		err error
+	}
+	late := make(chan result, 1)
+	a := typewirego.Of(typewirego.Opts[string]{Token: "t.A",
+		CreateWith: func(ctx context.Context, _ typewirego.Deps, r typewirego.Resolver) (string, error) {
+			go func() {
+				v, err := b.GetInstance(bg(), r)
+				late <- result{v, err}
+			}()
+			<-aRelease
+			return "a", nil
+		}})
+	c := typewirego.NewContainer(bg())
+	defer c.Teardown(bg())
+	apply(t, c, a, b)
+	ctx := ctxWithTimeout(t)
+	go c.Resolve(ctx, b.Token())
+	waitClosed(t, bIn, "B's creator")
+	aDone := make(chan error, 1)
+	go func() { _, err := c.Resolve(ctx, a.Token()); aDone <- err }()
+	// B's latch has two waiters once A's goroutine waits: the root resolve of B
+	// and that goroutine.
+	eventually(t, "A's goroutine waiting on B", func() bool { return typewirego.LatchWaiters(c, b.Token()) == 2 })
+	close(aRelease)
+	if err := recv(t, aDone, "A"); err != nil {
+		t.Fatal(err)
+	}
+	close(bRelease)
+	if r := recv(t, late, "the goroutine's resolve of B"); r.err != nil || r.v != "b" {
+		t.Fatalf("got %q, %v; want b", r.v, r.err)
 	}
 }
 

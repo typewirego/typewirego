@@ -46,7 +46,9 @@ const (
 //   - resolve-start, resolve-ok, resolve-failed: Path, the label chain from
 //     the root resolve, or from the nearest creator that has since returned,
 //     to this token, so a later event's Path can be shorter than the start's;
-//     ok and failed add Duration, ok adds Closer, failed adds ErrClass.
+//     ok and failed add Duration, ok adds Closer, failed adds ErrClass. ok
+//     means the callers get the value: a creation that finishes during
+//     Teardown's wait or after it is failed, with the class its callers get.
 //   - cycle-detected: Path, the cycle's labels.
 //   - closing: InFlight, the node ids of the creations still running.
 //   - cleanup-start, cleanup-ok, cleanup-failed: Closer; ok and failed add
@@ -54,7 +56,8 @@ const (
 //   - closed: InFlight, the creations still running; Remaining, the node
 //     ids of the observer set, cleaned after Flush; HeldBack, the node ids
 //     held back so far, for the late creations and for the cleanups Teardown
-//     stopped waiting for; ErrorCount, the cleanup failures so far. closed
+//     stopped waiting for; ErrorCount, the cleanup failures so far. An id is
+//     in one list at most: a set member already held back is in HeldBack. closed
 //     comes before the drainer stop and Flush, so when either of them overruns
 //     and holds back the observer set, *TeardownTimeoutError's HeldBack lists
 //     the set while closed lists it in Remaining.
@@ -275,13 +278,17 @@ func (c *Container) observerResolve(ctx context.Context, t Token, cacheOnly bool
 		return nil, c.refuseLocked(t, nil)
 	case o.disabled:
 		return nil, c.refuseLocked(t, ErrNotResolved)
-	case c.state == stateClosed:
+	case c.state == stateClosed && c.slots[t] != nil:
 		return nil, c.refuseLocked(t, ErrClosing)
 	}
 	s := c.slots[t]
 	if s == nil {
 		c.stats.observerResolveErrors.Add(1)
-		return nil, notRegistered(t)
+		err := notRegistered(t, c.state != stateOpen)
+		if c.state == stateClosed {
+			err = fmt.Errorf("%w: %w", ErrObserverResolve, err)
+		}
+		return nil, err
 	}
 	if s.core.scope == Transient {
 		return nil, c.refuseLocked(t, nil)

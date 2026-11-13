@@ -40,7 +40,8 @@
 // at a creator that has returned, since it waits on nothing. Across goroutines,
 // a resolve about to wait on another creation first walks the wait-for graph;
 // if that creation transitively waits on the caller's own chain, the resolve fails
-// with the same error (P11).
+// with the same error (P11). Its Path names every frame on the cycle, the
+// transient frames that are waiting included.
 //
 // # Concurrency and contexts
 //
@@ -51,7 +52,9 @@
 // NewContainer ctx, so a signal context ending at the start of a graceful drain
 // fails no creation; a caller's context bounds only that caller's wait (P13).
 // Transient creators run on the caller's goroutine under the caller's context.
-// A creator panic is recovered into *CreatorError and releases the latch.
+// A creator panic is recovered into *CreatorError and releases the latch; a
+// panic value that is an error is reachable from it through errors.Is and
+// errors.As, as a returned error is, and so is a closer's.
 // A value that needs a context outliving Closing, such as a background flusher,
 // takes Lifetime(deps), which ends only after that value's own cleanup.
 // A transient value's Lifetime is the container's, which ends once every cleanup
@@ -64,7 +67,10 @@
 // value gets no cleanup (P8). Singleton values are cleaned; the container never
 // retains a transient that reached its caller, so it never closes one. Teardown
 // cleans in reverse creation order, once, and returns every cleanup failure joined
-// (P10); the container is single-use afterwards (P9).
+// (P10); the container is single-use afterwards (P9): every resolve then fails
+// with ErrClosing, and one of a token that was never bound matches both
+// ErrWireNotRegistered and ErrClosing, except through a disabled observer's
+// resolver, which refuses every token alike.
 //
 // A wire owns what its creator creates, and the container assumes it does:
 // it closes every singleton value with a closer unless the wire says otherwise.
@@ -110,10 +116,12 @@
 // Teardown enters Closing, cancels the abort context and waits for in-flight
 // creations, bounded by its context. A creation finishing during that wait,
 // singleton or transient, is never cached or returned: it is cleaned in the
-// same pass, and its callers get ErrClosing. Such a transient is kept only for
-// its own cleanup and never claims or demotes an owner: it closes nothing when
-// it is KeepOpen or another creation already owns its value, and otherwise
-// closes the value once. If a singleton then finishes with that same value
+// same pass, its callers get ErrClosing, and the observer sees resolve-failed
+// with the class its callers get, never resolve-ok; so does a late creation,
+// one still running when the wait ends. Such a transient is kept
+// only for its own cleanup and never claims or demotes an owner: it closes
+// nothing when it is KeepOpen or another creation already owns its value, and
+// otherwise closes the value once. If a singleton then finishes with that same value
 // during the same wait, the singleton owns it and closes it at its own slot,
 // takes over the transient's token, so a running creation that imported that
 // transient still holds the value back, and the transient closes nothing; after
@@ -206,7 +214,9 @@
 // once, after that OnEvent returns and the drainer exits or that Flush returns,
 // by the last participant under the late context; Wait waits for that. The closed
 // event was queued before the drainer stop, so it lists them in Remaining,
-// not HeldBack, when it is delivered at all. The drainer goroutine exits only in
+// not HeldBack, when it is delivered at all. A set member already held back
+// when closed is queued, by a cleanup call Teardown stopped waiting for, is
+// cleaned late instead of after Flush, and closed lists it once, in HeldBack. The drainer goroutine exits only in
 // Teardown, so a container with an observer must be torn down.
 //
 // # Errors

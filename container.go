@@ -81,6 +81,9 @@ type Container struct {
 	// afterWake is a test hook run by a waiter after its wait ends and
 	// before it takes the lock again.
 	afterWake func(t Token)
+	// beforeClosed is a test hook run by Teardown after the main pass and
+	// before it queues the closed event.
+	beforeClosed func()
 }
 
 type statsCounters struct {
@@ -212,7 +215,7 @@ type inst struct {
 	err   error
 
 	imports map[Token]bool
-	waits   map[*inst]int
+	waits   map[*inst]map[*frame]int // creation waited on -> waiting frame -> count
 	// waiters counts the resolves currently waiting on this creation.
 	waiters int
 
@@ -379,7 +382,7 @@ func (c *Container) getCached(t Token, from *frame) (any, error) {
 	defer c.mu.Unlock()
 	s := c.slots[t]
 	if s == nil {
-		return nil, notRegistered(t)
+		return nil, notRegistered(t, c.state != stateOpen)
 	}
 	if from != nil {
 		c.recordImportLocked(from, t)

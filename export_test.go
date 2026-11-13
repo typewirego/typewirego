@@ -73,4 +73,10 @@ func SetAfterWakeHook(c *Container, f func(t Token)) {
 }
 
 // DrainerExited is closed when the observer's drainer goroutine exits.
+func SetBeforeClosedHook(c *Container, f func()) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.beforeClosed = f
+}
+
 func DrainerExited(c *Container) <-chan struct{} { return c.obs.exited }

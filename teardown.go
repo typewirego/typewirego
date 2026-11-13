@@ -28,8 +28,9 @@ func (c *Container) finish(i *inst, v any, err error) {
 	if err != nil {
 		i.err = &CreatorError{Label: i.label, Cause: err}
 		i.closing = c.state != stateOpen && !late
+		_, rerr := i.result()
 		c.emitLocked(Event{Kind: EventResolveFailed, NodeID: s.id, Label: i.label, Path: path,
-			Duration: dur, ErrClass: errClass(i.err)})
+			Duration: dur, ErrClass: errClass(rerr)})
 		i.cancelLife()
 		close(i.done)
 		c.mu.Unlock()
@@ -47,8 +48,16 @@ func (c *Container) finish(i *inst, v any, err error) {
 	default:
 		c.finishOpenLocked(i)
 	}
-	c.emitLocked(Event{Kind: EventResolveOK, NodeID: s.id, Label: i.label, Path: path,
-		Duration: dur, Closer: c.reportedCloserLocked(i).String()})
+	// resolve-ok means the callers get the value. A creation finishing during
+	// Teardown's wait or after it is cleaned, never returned, so it is a
+	// failure with the class its callers get.
+	if _, rerr := i.result(); rerr != nil {
+		c.emitLocked(Event{Kind: EventResolveFailed, NodeID: s.id, Label: i.label, Path: path,
+			Duration: dur, ErrClass: errClass(rerr)})
+	} else {
+		c.emitLocked(Event{Kind: EventResolveOK, NodeID: s.id, Label: i.label, Path: path,
+			Duration: dur, Closer: c.reportedCloserLocked(i).String()})
+	}
 	close(i.done)
 	c.mu.Unlock()
 	if late {
@@ -499,12 +508,24 @@ wait:
 
 	var errs []error
 	c.runPass(ctx, main, &errs, tt)
+	if c.beforeClosed != nil {
+		c.beforeClosed()
+	}
 
 	c.mu.Lock()
 	closed := Event{Kind: EventClosed, InFlight: c.inFlightIDsLocked(), HeldBack: idsOf(c.heldBack),
 		ErrorCount: len(errs)}
 	if c.obs != nil {
-		closed.Remaining = idsOf(c.obs.set)
+		// Remaining is what the observer-set pass will clean after Flush: a
+		// member already held back is cleaned late instead, and is listed
+		// once, in HeldBack.
+		remaining := map[*inst]bool{}
+		for i := range c.obs.set {
+			if !c.heldBack[i] {
+				remaining[i] = true
+			}
+		}
+		closed.Remaining = idsOf(remaining)
 	}
 	c.emitLocked(closed)
 	c.state = stateClosed
