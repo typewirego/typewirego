@@ -161,13 +161,17 @@ func TestP15EventsDeliveredInSequenceNeverReentrant(t *testing.T) {
 	lazy := leafWire("t.Lazy")
 	var once sync.Once
 	var pullErr error
+	pulled := make(chan struct{})
 	c, o := observed(nil)
 	o.mu.Lock()
 	o.onEvent = func(e typewirego.Event) {
 		if e.Kind == typewirego.EventResolveOK && e.Label != "t.Lazy" {
 			// Creating a value from inside OnEvent queues its events; they
 			// must not be delivered before this OnEvent returns.
-			once.Do(func() { _, pullErr = o.r.Resolve(bg(), lazy.Token()) })
+			once.Do(func() {
+				_, pullErr = o.r.Resolve(bg(), lazy.Token())
+				close(pulled)
+			})
 		}
 	}
 	o.mu.Unlock()
@@ -179,6 +183,10 @@ func TestP15EventsDeliveredInSequenceNeverReentrant(t *testing.T) {
 	for _, w := range ws {
 		mustResolve(t, c, w)
 	}
+	// Delivery is asynchronous: Resolve returns once its events are queued,
+	// not delivered. Until the pull has run, Teardown could enter Closing
+	// first, and P16 then refuses the pull's cache miss with ErrClosing.
+	waitClosed(t, pulled, "the pull from OnEvent")
 	if err := c.Teardown(bg()); err != nil {
 		t.Fatal(err)
 	}
