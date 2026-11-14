@@ -159,19 +159,20 @@ func TestP15ObserverPullsSinkInsideFirstOnEvent(t *testing.T) {
 
 func TestP15EventsDeliveredInSequenceNeverReentrant(t *testing.T) {
 	lazy := leafWire("t.Lazy")
-	var once sync.Once
+	// A CompareAndSwap, not a sync.Once: if delivery ever became re-entrant,
+	// a nested OnEvent must return at once so the overlap check reports it,
+	// where a nested once.Do would deadlock until the wait below timed out.
+	var pulling atomic.Bool
 	var pullErr error
 	pulled := make(chan struct{})
 	c, o := observed(nil)
 	o.mu.Lock()
 	o.onEvent = func(e typewirego.Event) {
-		if e.Kind == typewirego.EventResolveOK && e.Label != "t.Lazy" {
+		if e.Kind == typewirego.EventResolveOK && e.Label != "t.Lazy" && pulling.CompareAndSwap(false, true) {
 			// Creating a value from inside OnEvent queues its events; they
 			// must not be delivered before this OnEvent returns.
-			once.Do(func() {
-				_, pullErr = o.r.Resolve(bg(), lazy.Token())
-				close(pulled)
-			})
+			_, pullErr = o.r.Resolve(bg(), lazy.Token())
+			close(pulled)
 		}
 	}
 	o.mu.Unlock()
@@ -184,8 +185,9 @@ func TestP15EventsDeliveredInSequenceNeverReentrant(t *testing.T) {
 		mustResolve(t, c, w)
 	}
 	// Delivery is asynchronous: Resolve returns once its events are queued,
-	// not delivered. Until the pull has run, Teardown could enter Closing
-	// first, and P16 then refuses the pull's cache miss with ErrClosing.
+	// not delivered. Until the pull has run, Teardown could begin first. The
+	// pull would then be refused: t.Lazy is not cached and, once Teardown has
+	// frozen the observer set, not a member of it, so it fails with ErrClosing.
 	waitClosed(t, pulled, "the pull from OnEvent")
 	if err := c.Teardown(bg()); err != nil {
 		t.Fatal(err)
